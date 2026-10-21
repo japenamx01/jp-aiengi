@@ -1,0 +1,58 @@
+name: CI - Estimador CAG FastAPI
+
+on:
+  push:
+    branches: [ main, session-2 ]
+  pull_request:
+    branches: [ main, session-2 ]
+
+jobs:
+  validate-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout del código
+      uses: actions/checkout@v4
+
+    - name: Configurar entorno Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Instalar gestor de paquetes uv
+      run: pip install uv
+
+    - name: Instalar dependencias del proyecto
+      run: uv sync
+
+    - name: Validar estructura de carpetas obligatorias
+      run: |
+        echo "Verificando estructura del scaffolding..."
+        test -f pyproject.toml
+        test -f README.md
+        test -d app
+        test -f app/main.py
+        test -f app/config.py
+        test -f app/routers/estimations.py
+        test -f app/services/llm_service.py
+        test -f app/context/examples.py
+        echo "¡Estructura de carpetas validada correctamente!"
+
+    - name: Comprobar sintaxis y ejecución del health check
+      env:
+        # Se definen valores ficticios solo para que Pydantic-settings no falle al importar el config
+        OPENAI_API_KEY: "fake-key-for-ci"
+      run: |
+        echo "Arrancando servidor en segundo plano para prueba de humo..."
+        uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+        SERVER_PID=$!
+        
+        # Esperar a que el servidor arranque
+        sleep 3
+        
+        # Comprobar el endpoint de health
+        echo "Probando endpoint /health..."
+        curl -f http://127.0.0.1:8000/health
+        
+        # Apagar el servidor
+        kill $SERVER_PID
