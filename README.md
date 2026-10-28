@@ -1,31 +1,70 @@
-# Estimador de Software con Arquitectura CAG (Cache Augmented Generation)
+Aquí tienes todo el contenido completo en un único bloque en formato Markdown, listo para copiar y pegar directamente en tu archivo `README.md` de la rama `session_3`.
 
-Aplicación backend construida con **FastAPI** y **uv** que implementa una arquitectura **CAG**. El servicio recibe transcripciones de reuniones con clientes y genera estimaciones estructuradas de desarrollo utilizando un LLM con contexto estático inyectado directamente en el prompt.
+Ya incluye la estructura limpia del proyecto sin referencias a `.streamlit` y usando el fichero `.env` en la raíz:
+
+```markdown
+# AI Engineering Project - Estimador CAG & Wrapper Conversacional
+
+Repositorio para el desarrollo y despliegue de sistemas inteligentes basados en Arquitecturas CAG (Cache-Augmented Generation) y patrones de diseño para wrappers de modelos de lenguaje, desarrollado en el marco del programa de AI Engineering.
 
 ---
 
-## 🏗 Arquitectura del Proyecto
+## 📂 Estructura del Repositorio
 
-Este servicio utiliza la arquitectura **CAG** (Cache Augmented Generation). A diferencia de RAG tradicional, todo el contexto necesario (ejemplos históricos de estimaciones de referencia) viaja estáticamente en cada llamada al sistema, eliminando la necesidad de bases de datos vectoriales o sistemas de recuperación complejos para este caso de uso.
+El proyecto se organiza de la siguiente manera:
 
 ```text
-estimador-cag/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── routers/
-│   │   ├── __init__.py
-│   │   └── estimations.py
-│   ├── services/
-│   │   ├── __init__.py
-│   │   └── llm_service.py
-│   └── context/
-│       ├── __init__.py
-│       └── examples.py
-├── .env
-├── .env.example
-├── .gitignore
-├── pyproject.toml
-└── README.md
+.
+├── streamlit_app.py          # Interfaz web conversacional (Sesión 3 - Streamlit + Streaming + CAG)
+├── .env                      # Fichero con las variables de entorno (API Key)
+├── pyproject.toml / uv.lock  # Dependencias y gestión del entorno con uv
+└── README.md                 # Documentación del proyecto
 
+```
+
+---
+
+## 🚀 Funcionalidades Principales
+
+1. **Estimador de Software Basado en CAG (Cache-Augmented Generation):**
+* Inyección de contexto histórico de referencia para guiar al modelo en la generación de requerimientos y desgloses de fases de desarrollo.
+
+
+2. **Interfaz Conversacional Web (Sesión 3):**
+* **Nivel 1:** Chat interactivo mediante Streamlit (`st.chat_message`, `st.chat_input`) con persistencia del historial de la conversación (`st.session_state`).
+* **Nivel 2:** Respuesta del LLM en tiempo real mediante streaming token a token (`st.write_stream`).
+* **Nivel 3:** Panel de control lateral (`st.sidebar`) que muestra el System Prompt activo, el contexto estático inyectado y métricas de rendimiento (modelo, tokens de entrada/salida y tiempo de respuesta).
+
+
+3. **Gestión Segura de Credenciales:**
+* Carga centralizada de la clave de API mediante variables de entorno desde el fichero `.env` en la raíz.
+
+
+
+---
+
+## 🛠️ Ejecución Local con `uv`
+
+### 1. Configuración del Fichero `.env`
+
+Asegúrate de tener un fichero `.env` en la raíz de tu proyecto con tu clave de API:
+
+```env
+OPENAI_API_KEY=tu-clave-real-aqui
+
+```
+
+### 2. Ejecución de la Interfaz
+
+Arranca la aplicación web directamente con `uv`:
+
+```bash
+uv run streamlit run streamlit_app.py
+
+```
+
+Esto abrirá de forma automática la interfaz gráfica en tu navegador web por defecto (`http://localhost:8501`).
+
+```
+
+```

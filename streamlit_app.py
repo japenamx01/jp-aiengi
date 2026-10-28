@@ -17,15 +17,6 @@ st.set_page_config(
 )
 
 # ==========================================
-# INICIALIZACIÓN DEL CLIENTE Y ESTADO
-# ==========================================
-# Se lee de la variable de entorno cargada por el .env (o de st.secrets como respaldo)
-api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
-
-client = OpenAI(api_key=api_key)
-
-
-# ==========================================
 # CONSTANTES Y CONFIGURACIÓN CAG (Nivel 3)
 # ==========================================
 SYSTEM_PROMPT = (
@@ -49,11 +40,11 @@ STATIC_CONTEXT = """
 # ==========================================
 # INICIALIZACIÓN DEL CLIENTE Y ESTADO
 # ==========================================
-# La API Key se lee de forma segura desde st.secrets o variables de entorno locales
-try:
-    api_key = st.secrets["OPENAI_API_KEY"]
-except Exception:
-    api_key = None  # Si usas otra variable o .env gestionado externamente
+# Lectura estricta de la variable de entorno desde .env
+api_key = os.getenv("OPENAI_API_KEY")
+
+if not api_key:
+    st.error("⚠️ No se ha encontrado la variable `OPENAI_API_KEY` en el fichero `.env`.")
 
 client = OpenAI(api_key=api_key)
 
@@ -109,9 +100,8 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Entrada de texto del usuario (soporta transcripciones largas)
+# Entrada de texto del usuario
 if prompt := st.chat_input("Pega aquí la transcripción de la reunión..."):
-    # Guardar mensaje del usuario en el historial
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -120,24 +110,20 @@ if prompt := st.chat_input("Pega aquí la transcripción de la reunión..."):
     with st.chat_message("assistant"):
         start_time = time.time()
         
-        # Construir mensajes incluyendo el System Prompt y el Contexto CAG
         messages_payload = [
             {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nContexto de referencia:\n{STATIC_CONTEXT}"}
         ]
-        # Añadir el historial previo de la sesión
         for m in st.session_state.messages:
             messages_payload.append({"role": m["role"], "content": m["content"]})
 
         try:
-            # Llamada en streaming al LLM
             stream = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages_payload,
                 stream=True,
-                stream_options={"include_usage": True} # Permite capturar el consumo de tokens en streaming
+                stream_options={"include_usage": True}
             )
 
-            # Función generadora para mostrar el streaming token a token con st.write_stream
             def stream_response():
                 full_content = ""
                 completion_tokens_count = 0
@@ -145,7 +131,6 @@ if prompt := st.chat_input("Pega aquí la transcripción de la reunión..."):
                 
                 for chunk in stream:
                     if chunk.usage:
-                        # Capturamos tokens de uso si vienen en el último chunk
                         completion_tokens_count = chunk.usage.completion_tokens
                         prompt_tokens_count = chunk.usage.prompt_tokens
                         
@@ -154,7 +139,6 @@ if prompt := st.chat_input("Pega aquí la transcripción de la reunión..."):
                         full_content += content_chunk
                         yield content_chunk
                 
-                # Actualizar métricas al terminar el flujo
                 elapsed_time = time.time() - start_time
                 st.session_state.last_metrics = {
                     "model": "gpt-4o-mini",
@@ -164,10 +148,7 @@ if prompt := st.chat_input("Pega aquí la transcripción de la reunión..."):
                 }
 
             response_text = st.write_stream(stream_response())
-            
-            # Guardar la respuesta completa en el historial de la sesión
             st.session_state.messages.append({"role": "assistant", "content": response_text})
 
         except Exception as e:
             st.error(f"Error al conectar con el servicio de LLM: {e}")
-
