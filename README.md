@@ -1,7 +1,6 @@
 
-
 ```markdown
-# AI Engineering Project - Estimador CAG & Wrapper Conversacional
+# AI Engineering Project - Estimador CAG & Wrapper Conversacional - Session-3
 
 Repositorio para el desarrollo y despliegue de sistemas inteligentes basados en Arquitecturas CAG (Cache-Augmented Generation) y patrones de diseño para wrappers de modelos de lenguaje, desarrollado en el marco del programa de AI Engineering.
 
