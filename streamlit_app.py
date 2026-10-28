@@ -45,6 +45,7 @@ api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
     st.error("⚠️ No se ha encontrado la variable `OPENAI_API_KEY` en el fichero `.env`.")
+    st.stop()
 
 client = OpenAI(api_key=api_key)
 
@@ -149,6 +150,8 @@ if prompt := st.chat_input("Pega aquí la transcripción de la reunión..."):
 
             response_text = st.write_stream(stream_response())
             st.session_state.messages.append({"role": "assistant", "content": response_text})
+            # Re-ejecutar para que el panel lateral muestre las métricas de esta llamada
+            st.rerun()
 
         except Exception as e:
             st.error(f"Error al conectar con el servicio de LLM: {e}")
