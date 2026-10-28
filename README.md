@@ -1,6 +1,4 @@
-Aquí tienes todo el contenido completo en un único bloque en formato Markdown, listo para copiar y pegar directamente en tu archivo `README.md` de la rama `session_3`.
 
-Ya incluye la estructura limpia del proyecto sin referencias a `.streamlit` y usando el fichero `.env` en la raíz:
 
 ```markdown
 # AI Engineering Project - Estimador CAG & Wrapper Conversacional
