@@ -9,3 +9,8 @@ guides/
 .vscode/
 __pycache__/
 .claude/
+
+# Local secrets and tool artifacts at the repo root
+.env
+.agents/
+.playwright-mcp/
