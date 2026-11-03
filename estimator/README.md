@@ -95,6 +95,44 @@ A partir de la Sesion 3 el servicio incorpora una capa de wrapper sobre el LLM q
 - **Streaming SSE** — endpoint `POST /api/v1/estimate/stream` que emite los tokens segun llegan
 - **UI Streamlit** — cliente real que consume el endpoint SSE
 
+### Fallback real: un grupo por modelo en el Router
+
+El Router de LiteLLM agrupa los despliegues por `model_name`. Si el primario y el
+fallback comparten nombre, el Router los trata como **intercambiables** y la estrategia
+por defecto (`simple-shuffle`) reparte el trafico entre ambos: en una prueba de 200
+llamadas, 87 fueron a Claude aunque OpenAI respondia bien. Eso no es un fallback, es
+un balanceo de carga (y Claude Haiku cuesta ~7x mas por token que `gpt-4o-mini`).
+
+Para que el secundario se use **solo cuando el primario falla**, cada modelo vive en su
+propio grupo y `fallbacks` enlaza uno con otro (`app/services/llm_wrapper.py`):
+
+```python
+PRIMARY_GROUP = "estimator"
+FALLBACK_GROUP = "estimator-fallback"
+
+Router(
+    model_list=[
+        {"model_name": PRIMARY_GROUP, "litellm_params": {"model": primary_model, ...}},
+        {"model_name": FALLBACK_GROUP, "litellm_params": {"model": fallback_model, ...}},
+    ],
+    fallbacks=[{PRIMARY_GROUP: [FALLBACK_GROUP]}],
+    num_retries=num_retries,
+)
+
+# Todas las llamadas van al grupo primario; LiteLLM salta al fallback si falla
+self.router.completion(model=PRIMARY_GROUP, ...)
+```
+
+Resultado: el 100% de las llamadas sanas las responde `PRIMARY_MODEL`, y con OpenAI
+caido (p. ej. una API key invalida) responde `FALLBACK_MODEL`. El modelo que
+realmente respondio aparece en el sidebar de Streamlit y en el log `llm_call_completed`
+/ `llm_stream_completed`. El test
+`test_router_always_picks_primary_and_falls_back_on_failure` evita que se vuelvan a
+juntar en un mismo grupo.
+
+Para que el fallback funcione hace falta `ANTHROPIC_API_KEY` en `.env`; sin ella la
+app arranca igual pero no tiene respaldo.
+
 ### Arrancar la stack completa
 
 ```bash
