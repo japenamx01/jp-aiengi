@@ -1,8 +1,16 @@
-.env
-__pycache__/
-.venv/
-.pytest_cache/
+# Live-session guides — written for the instructor, exported to Notion,
+# never committed.
+guides/
 
-.agents/
+# Local environment / editor cruft (the project also has its own .gitignore
+# inside estimator/, this catches files at the repo root).
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
 .claude/
+
+# Local secrets and tool artifacts at the repo root
+.env
+.agents/
 .playwright-mcp/
