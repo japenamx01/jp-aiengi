@@ -40,6 +40,42 @@ services:
       start_period: 10s
       retries: 3
 
+  streamlit:
+    # Same image as the API: streamlit is already a runtime dependency.
+    build: .
+    container_name: estimator-streamlit
+    ports:
+      - "8501:8501"
+
+    env_file:
+      - .env
+
+    # Inside the compose network the API is reachable by its service name,
+    # not localhost (which would be the streamlit container itself).
+    environment:
+      ESTIMATOR_API_BASE_URL: http://estimator:8000
+
+    depends_on:
+      estimator:
+        condition: service_healthy
+
+    # Bind-mount the UI so edits show up after a browser "Rerun".
+    volumes:
+      - ./streamlit_app.py:/app/streamlit_app.py
+
+    command: >
+      streamlit run streamlit_app.py
+      --server.port 8501 --server.address 0.0.0.0 --server.headless true
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
   redis:
     image: redis:7-alpine
     container_name: estimator-redis

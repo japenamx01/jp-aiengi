@@ -38,8 +38,9 @@ WORKDIR /app
 # Bring in the pre-built virtual environment from the builder stage.
 COPY --from=builder /app/.venv /app/.venv
 
-# Copy application source code.
+# Copy application source code (API package and the Streamlit UI).
 COPY app/ /app/app/
+COPY streamlit_app.py /app/
 
 # Ensure the non-root user owns everything it needs to run.
 RUN chown -R appuser:appgroup /app
@@ -55,7 +56,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Switch to the non-root user for all subsequent commands and at runtime.
 USER appuser
 
-EXPOSE 8000
+# 8000: FastAPI (default CMD). 8501: Streamlit (compose `streamlit` service).
+EXPOSE 8000 8501
 
 # Docker-native health check. The orchestrator (Compose, Swarm, K8s) will
 # mark the container as unhealthy if this probe fails consecutively.

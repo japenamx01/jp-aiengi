@@ -100,7 +100,8 @@ A partir de la Sesion 3 el servicio incorpora una capa de wrapper sobre el LLM q
 ```bash
 cd estimator
 docker compose up --build
-# La API queda en http://localhost:8000 y Redis en redis://localhost:6379
+# La API queda en http://localhost:8000, Streamlit en http://localhost:8501
+# y Redis en redis://localhost:6379
 ```
 
 ### Probar el endpoint SSE
@@ -128,13 +129,16 @@ docker compose exec redis redis-cli KEYS 'estimation:*'
 
 ### Streamlit
 
-Streamlit corre **fuera** de Docker y consume el endpoint SSE por HTTP:
+Streamlit levanta con `docker compose up` como el servicio `streamlit` y consume el
+endpoint SSE por HTTP. Abrir [http://localhost:8501](http://localhost:8501).
+Dentro de la red de compose apunta a `http://estimator:8000`.
+
+Para correrlo **fuera** de Docker (contra la API en `localhost:8000`):
 
 ```bash
 cd estimator
 uv sync
 uv run streamlit run streamlit_app.py
-# Abrir http://localhost:8501
 ```
 
 La URL del backend se lee de `ESTIMATOR_API_BASE_URL` (default `http://localhost:8000`).
