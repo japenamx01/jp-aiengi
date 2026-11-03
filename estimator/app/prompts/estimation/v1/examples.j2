@@ -1,0 +1,120 @@
+{#
+  Few-shot reference estimations. The data is defined once and rendered in the
+  same output_format / detail_level the user asked for, so the examples never
+  contradict the format instructions in system.j2.
+#}
+{# Lower-case the first letter for mid-sentence use, but keep acronyms ("UX", "REST"). #}
+{% macro decap(items, sep) %}{% for i in items %}{{ i[:1] | lower if i[1:2].islower() else i[:1] }}{{ i[1:] }}{% if not loop.last %}{{ sep }}{% endif %}{% endfor %}{% endmacro %}
+{% set examples = [
+  {
+    "title": "Field inspection app for an elevator maintenance company",
+    "summary": "Technicians inspect elevators in basements with no coverage, so the app must work offline: checklists per elevator model, photos, and the client's signature on the phone. Office staff review and send the reports from a web back-office.",
+    "phases": [
+      {"name": "Discovery and UX design", "hours": 32, "cost": 1600, "confidence": 85,
+       "tasks": ["Interviews with three technicians", "Checklist and report flows", "Mobile and back-office wireframes"],
+       "assumptions": ["Checklists exist today on paper and can be digitised as-is"]},
+      {"name": "Backend API and back-office", "hours": 80, "cost": 5000, "confidence": 75,
+       "tasks": ["Data model for sites, elevators and inspections", "REST API with authentication", "Report review and PDF export"],
+       "assumptions": ["Fewer than 50 office users", "No integration with the current ERP in this phase"]},
+      {"name": "Mobile app with offline sync", "hours": 120, "cost": 7500, "confidence": 60,
+       "tasks": ["Cross-platform app (React Native)", "Local storage and conflict-free sync", "Camera and signature capture"],
+       "assumptions": ["Inspections are edited by one technician at a time"]},
+      {"name": "Device QA and store release", "hours": 40, "cost": 2500, "confidence": 80,
+       "tasks": ["Testing on six Android and iOS devices", "App Store and Google Play submission"],
+       "assumptions": ["The client provides the store developer accounts"]},
+    ],
+    "team": "1 mobile developer, 1 backend developer, 1 designer (first 2 weeks), 1 QA (last 2 weeks)",
+    "weeks": 9,
+  },
+  {
+    "title": "Holiday and absence request tool for a logistics company",
+    "summary": "A 300-employee logistics company wants to replace spreadsheets with an internal tool where employees request holidays and absences, managers approve them, and HR exports the result to payroll every month. Login must use the company's Google Workspace accounts.",
+    "phases": [
+      {"name": "Requirements and workflow design", "hours": 16, "cost": 1000, "confidence": 90,
+       "tasks": ["Approval rules per department", "Absence types and yearly allowances"],
+       "assumptions": ["A single approval level (direct manager)"]},
+      {"name": "Request and approval workflow", "hours": 56, "cost": 3500, "confidence": 80,
+       "tasks": ["Request form and team calendar", "Manager approval inbox with email notifications", "Allowance balance per employee"],
+       "assumptions": ["Public holidays are the same for every site"]},
+      {"name": "SSO and payroll export", "hours": 32, "cost": 2000, "confidence": 65,
+       "tasks": ["Google Workspace single sign-on", "Monthly CSV export in the payroll provider's layout"],
+       "assumptions": ["The payroll provider accepts a CSV upload; no API integration"]},
+      {"name": "Testing, data migration and rollout", "hours": 24, "cost": 1500, "confidence": 85,
+       "tasks": ["Import of current balances from spreadsheets", "Pilot with one department", "Short user guide"],
+       "assumptions": ["HR cleans the spreadsheets before the import"]},
+    ],
+    "team": "1 full-stack developer, 1 QA (part-time)",
+    "weeks": 5,
+  },
+  {
+    "title": "Nightly sales pipeline into BigQuery",
+    "summary": "A retail chain runs three different point-of-sale systems. They want a nightly pipeline that consolidates all sales into BigQuery, flags data-quality problems, and feeds a Looker Studio dashboard for the regional managers.",
+    "phases": [
+      {"name": "Source analysis and data model", "hours": 24, "cost": 1500, "confidence": 80,
+       "tasks": ["Profiling of the three POS exports", "Unified sales and product model"],
+       "assumptions": ["Each POS can export at least a daily file or has a read-only database"]},
+      {"name": "Connectors and incremental loads", "hours": 64, "cost": 4000, "confidence": 60,
+       "tasks": ["One connector per POS", "Incremental loads with idempotent re-runs", "Scheduling with Cloud Composer"],
+       "assumptions": ["Two years of history to backfill, under 50 million rows"]},
+      {"name": "Data quality checks and alerting", "hours": 32, "cost": 2000, "confidence": 75,
+       "tasks": ["Row count and totals reconciliation", "Duplicate and missing-store checks", "Slack alerts on failure"],
+       "assumptions": ["Alerts go to a single on-call channel"]},
+      {"name": "Dashboard and handover", "hours": 24, "cost": 1500, "confidence": 85,
+       "tasks": ["Looker Studio sales dashboard", "Runbook and handover session"],
+       "assumptions": ["The client's analyst maintains the dashboard afterwards"]},
+    ],
+    "team": "1 data engineer, 1 data analyst (part-time)",
+    "weeks": 6,
+  },
+] %}
+{% for ex in examples %}
+{% set total_hours = ex.phases | sum(attribute="hours") %}
+{% set total_cost = ex.phases | sum(attribute="cost") %}
+--- EXAMPLE {{ loop.index }}: {{ ex.title }} ---
+Project description:
+{{ ex.summary }}
+
+Estimation:
+{% if output_format == "phases_table" %}
+| Phase | Hours | Cost (EUR) | confidence_pct |
+|-------|------:|-----------:|---------------:|
+{% for p in ex.phases %}
+| {{ p.name }} | {{ p.hours }} | {{ "{:,}".format(p.cost) }} | {{ p.confidence }} |
+{% endfor %}
+{% if detail_level != "summary" %}
+
+{% for p in ex.phases %}
+**{{ p.name }}:** {{ p.tasks | join("; ") }}.
+{% if detail_level == "detailed" %}
+Assumptions: {{ p.assumptions | join("; ") }}.
+{% endif %}
+{% endfor %}
+{% endif %}
+{% elif output_format == "line_items" %}
+{% for p in ex.phases %}
+- {{ p.name }} — {{ p.hours }} h — {{ "{:,}".format(p.cost) }} EUR
+{% if detail_level != "summary" %}
+{% for t in p.tasks %}
+  - {{ t }}
+{% endfor %}
+{% endif %}
+{% if detail_level == "detailed" %}
+  - Assumptions: {{ p.assumptions | join("; ") }}
+{% endif %}
+{% endfor %}
+{% elif output_format == "narrative" %}
+{% for p in ex.phases %}
+{{ "We would start with" if loop.first else ("Finally, we would cover" if loop.last else "Next, we would cover") }} {{ decap([p.name], "") }}, which we estimate at {{ p.hours }} hours ({{ "{:,}".format(p.cost) }} EUR){% if detail_level != "summary" %}, covering {{ decap(p.tasks, ", ") }}{% endif %}.{% if detail_level == "detailed" %} Main assumptions: {{ decap(p.assumptions, "; ") }}.{% endif %}
+
+{% endfor %}
+In total, the project requires {{ total_hours }} hours ({{ "{:,}".format(total_cost) }} EUR) with a team of {{ ex.team }}, over an estimated {{ ex.weeks }} weeks.
+{% endif %}
+{% if output_format != "narrative" %}
+
+- Total hours: {{ total_hours }}
+- Total cost: {{ "{:,}".format(total_cost) }} EUR
+- Recommended team: {{ ex.team }}
+- Estimated duration: {{ ex.weeks }} weeks
+{% endif %}
+
+{% endfor %}

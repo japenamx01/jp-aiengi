@@ -4,8 +4,8 @@ and structured logging to every LLM call in the estimator.
 Design notes
 ------------
 - The wrapper exposes two primitives: ``complete()`` (blocking, full response) and
-  ``complete_stream()`` (yields chunks). Higher-level orchestration (preprocessing,
-  validation, prompt building) stays in ``llm_service.py``.
+  ``complete_stream()`` (yields chunks). Prompt rendering lives in
+  ``app.prompts.loader``; the routers glue both together.
 - The Router is configured with two model groups, "estimator" (primary) and
   "estimator-fallback", linked by ``fallbacks`` so LiteLLM switches to the
   fallback only when the primary fails. Putting both deployments under the same
@@ -14,8 +14,8 @@ Design notes
   bypass the Router and call ``litellm.completion`` directly with explicit
   credentials — that path has no fallback by design.
 - The cache key includes the full system prompt and the generation knobs, so any
-  Session 2 toggle (preprocessing, num_examples, ACTIVE_OUTPUT_PROMPT) implicitly
-  invalidates the cache without manual flushing.
+  change in the request parameters or the prompt version implicitly invalidates
+  the cache without manual flushing.
 """
 
 from __future__ import annotations

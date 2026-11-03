@@ -38,56 +38,38 @@ Service listens on `http://localhost:8000`; `/docs` (Swagger) and `/redoc` are e
 
 The estimator is a FastAPI service implementing **Cache Augmented Generation (CAG)**: reference estimations are inlined as static text inside the system prompt — no vector store, no retrieval step. This is a deliberate first-stage choice; later modules will migrate to RAG.
 
-Request flow:
+Request flow (Session 4):
 
-1. `app/routers/estimations.py` — `POST /api/v1/estimate` accepts an `EstimationRequest` (transcription + optional knobs: `preprocessing`, `example_format`, `num_examples`, `use_examples`, `model`, `max_tokens`, `thinking_budget`, `evaluate`).
-2. `app/services/llm_service.py::generate_estimation` — builds a `GenerationOptions`, optionally runs `extract_requirements` for two-phase preprocessing, builds the system prompt (`build_system_prompt`), and dispatches to either `_call_openai` or `_call_anthropic` based on `LLM_PROVIDER`. Returns a dict with `estimation`, `model`, `provider`, `usage`, `finish_reason`, `latency_ms`, `preprocessing`, `extracted_requirements`.
-3. `app/services/evaluation.py::evaluate_estimation_structure` — pure regex/parsing pass that produces a `StructureCheck` (sections present, breakdown sums match declared totals, `finish_reason` ok, `score`, `issues`).
-4. The router merges the LLM result with the validation and returns `EstimationResponse`.
+1. `streamlit_app.py` — a `st.form` builds an `EstimationRequest` (it imports the same Pydantic model from `app.schemas.estimation`) and POSTs it to `/api/v1/estimate?prompt_version=...`.
+2. `app/routers/estimations.py` — validates the typed body (`description` 20-2000 chars + enums `project_type`, `detail_level`, `output_format`), calls `render_estimation_prompt`, and sends `system` and `user` as **separate** messages through the `LLMWrapper` (`Depends(get_llm_wrapper)`). Returns `EstimationResponse` (`text`, `prompt_version` + call metadata for the sidebar). Also: `POST /estimate/stream` (same contract over SSE: `token`, `metrics`, `done`), `POST /prompt/preview` (rendered messages, no LLM call), `GET /prompts/versions`.
+3. `app/prompts/loader.py::render_estimation_prompt(request, version="v1") -> (system, user)` — Jinja2 `Environment` with `StrictUndefined`, `trim_blocks`, `lstrip_blocks`. Templates live in `app/prompts/estimation/<version>/{system,user,examples}.j2`. Versions are whitelisted against the directories on disk; unknown ones raise `UnknownPromptVersionError` (the router maps it to 422). Each render logs `prompt_rendered` with the version and a content hash.
+4. `app/services/llm_wrapper.py` — LiteLLM Router with cache, fallback, cost and token usage (also in streaming via `stream_options.include_usage`).
 
 Key design points future changes should respect:
 
-- **Provider abstraction lives in one file** (`llm_service.py`). Both branches return the same dict shape (`estimation`, `model`, `provider`, `finish_reason`, `usage`) so the router stays provider-agnostic. Keep that contract when adding providers.
-- **Settings are a cached singleton** via `app/config.py::get_settings` (`@lru_cache`). Pydantic Settings runs a `model_validator` that requires the API key matching `LLM_PROVIDER` to be set — changing provider also requires changing the key. Because of the cache, **any change to `.env` requires restarting uvicorn** (a `--reload` is not enough; the singleton is module-scoped).
-- **CAG examples** live in `app/context/examples.py`. The single source of truth is `CANONICAL_EXAMPLES: list[CanonicalExample]`; the three formatters (`_format_markdown`, `_format_json`, `_format_narrative`) derive their output from it. `estimation_markdown` is precomputed per example so the Markdown rendering stays byte-for-byte stable. When this graduates to RAG, this module is the seam to replace.
-- **Pricing assumptions** (62.50 EUR/h dev, 50 EUR/h designer) live in `build_system_prompt`. Edit there, not in examples. Each canonical example must satisfy `sum_h == total_hours` and `sum_c == total_cost` (a unit test enforces this).
-- **Output prompt switch**: `llm_service.py` defines `PROMPT_OUTPUT_BASIC` and `PROMPT_OUTPUT_STRUCTURED`; the `ACTIVE_OUTPUT_PROMPT` line picks one. The Session 2 live demo flips this constant on the fly.
-- **`thinking_budget` is Anthropic-only** — for OpenAI it is logged as a warning and ignored. The Anthropic wrapper auto-pads `max_tokens` so it stays above the budget.
+- **Prompts are versioned and immutable.** Never edit a published `vN/` in place: copy it to `vN+1/` and change it there, so every logged `prompt_version` maps to the exact text used. `system.j2` includes its own version's `examples.j2` by full path.
+- **Prompt text lives only in `.j2` files** — no f-string prompts in Python. Pricing assumptions (62.50 EUR/h dev, 50 EUR/h designer) are in `system.j2`.
+- **Few-shot examples are data rendered per format**: `examples.j2` defines the examples once (`{% set examples = [...] %}`) and renders them in the requested `output_format`/`detail_level`, so they never contradict the format instructions. The template tests rely on this (e.g. `confidence_pct` must not appear with `narrative`). Example costs must equal the sum of their phases.
+- **Router fallback needs one model group per model** (`PRIMARY_GROUP` / `FALLBACK_GROUP` linked by `fallbacks`). Putting both deployments under the same `model_name` makes LiteLLM load-balance between them. `test_router_always_picks_primary_and_falls_back_on_failure` guards this.
+- **Cache key = rendered prompt + generation knobs**, so changing a form parameter or the prompt version invalidates the cache automatically.
+- **Settings are a cached singleton** via `app/config.py::get_settings` (`@lru_cache`); any change to `.env` requires restarting the service (a `--reload` is not enough). At least one of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` must be set; the fallback needs both.
 - **Logging** is `structlog`, configured in `lifespan` (`main.py`): JSON in `production`, console in dev. Use `structlog.get_logger()` rather than stdlib `logging`.
 
-## How to compare in live demos
+## Tests
 
-The endpoint is built to support side-by-side comparisons without code changes. The `usage`, `latency_ms`, `finish_reason` and `validation.score` fields in the response are the projected metrics during sessions.
-
-```bash
-TRANS=$(jq -Rs . < estimator/app/fixtures/long_transcription.txt)
-
-# Three preprocessing modes
-for MODE in none inline_cleaning two_phase; do
-  curl -s localhost:8000/api/v1/estimate -H 'Content-Type: application/json' \
-    -d "{\"transcription\": $TRANS, \"preprocessing\":\"$MODE\"}" \
-    | jq "{mode:\"$MODE\", score:.validation.score, latency_ms, usage}"
-done
-
-# Number of CAG examples (rendimiento decreciente)
-for N in 0 1 3 5; do
-  curl -s localhost:8000/api/v1/estimate -H 'Content-Type: application/json' \
-    -d "{\"transcription\": $TRANS, \"num_examples\": $N}" \
-    | jq "{n: $N, input_tokens: .usage.input_tokens, latency_ms, score: .validation.score}"
-done
-```
-
-The full session script lives in `estimator/docs/session-2-guide.md`.
+- `tests/prompts/` — template tests: they assert on the rendered text only (no LLM, no network, milliseconds). They do not evaluate the quality of the model's answer.
+- Endpoint and stream tests replace the wrapper with a stub via `app.dependency_overrides[get_llm_wrapper]`; wrapper and cache tests use `fakeredis`.
 
 ## Configuration
 
 `.env` (copied from `.env.example`) drives everything via `pydantic-settings`. Notable vars:
 
-- `LLM_PROVIDER` — `openai` (default) or `anthropic`.
-- `LLM_MODEL` — model id passed straight through to the SDK (e.g. `gpt-4o-mini`, `claude-...`).
-- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — only the one matching `LLM_PROVIDER` is required.
+- `PRIMARY_MODEL` / `FALLBACK_MODEL` — LiteLLM model ids for the Router (defaults `gpt-4o-mini` / `claude-haiku-4-5-20251001`).
+- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — at least one is required; the fallback needs both.
+- `REDIS_URL`, `CACHE_TTL` — exact-match cache (compose overrides `REDIS_URL` to `redis://redis:6379`).
+- `ESTIMATOR_API_BASE_URL` — where Streamlit reaches the API (compose sets `http://estimator:8000`).
 - `APP_ENV` — `development` | `staging` | `production` (controls log renderer).
 
 ## Docker
 
-Multi-stage Dockerfile: `builder` installs prod-only deps with `uv sync --no-install-project --no-dev`, `runtime` is a clean `python:3.11-slim` that only carries `/app/.venv` and `app/`, runs as non-root `appuser`. There is a Docker-native HEALTHCHECK against `/health`. `docker-compose.yml` bind-mounts `./app` and adds `--reload` for dev — strip both for any production deployment.
+Multi-stage Dockerfile: `builder` installs prod-only deps with `uv sync --no-install-project --no-dev`, `runtime` is a clean `python:3.11-slim` that only carries `/app/.venv`, `app/` and `streamlit_app.py`, runs as non-root `appuser`. There is a Docker-native HEALTHCHECK against `/health`. `docker-compose.yml` runs three services from that image plus Redis: `estimator` (API, :8000), `streamlit` (UI, :8501) and `redis`. It bind-mounts `./app` (and `streamlit_app.py`) and adds `--reload` for dev — strip both for any production deployment.

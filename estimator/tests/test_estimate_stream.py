@@ -6,6 +6,13 @@ from fastapi.testclient import TestClient
 from app.dependencies import get_llm_wrapper
 from app.main import app
 
+VALID_BODY = {
+    "description": "Pipeline nocturno que consolida ventas de tres tiendas en BigQuery.",
+    "project_type": "data_pipeline",
+    "detail_level": "medium",
+    "output_format": "phases_table",
+}
+
 
 class _StubWrapper:
     """Minimal stand-in for LLMWrapper that yields canned chunks."""
@@ -20,18 +27,9 @@ class _StubWrapper:
         *,
         system_prompt: str,
         user_message: str,
-        model_override: str | None,
-        max_tokens: int,
         metrics: dict | None = None,
     ) -> Iterator[str]:
-        self.calls.append(
-            {
-                "system_prompt": system_prompt,
-                "user_message": user_message,
-                "model_override": model_override,
-                "max_tokens": max_tokens,
-            }
-        )
+        self.calls.append({"system_prompt": system_prompt, "user_message": user_message})
         for chunk in self._chunks:
             yield chunk
         if metrics is not None:
@@ -46,7 +44,7 @@ def test_stream_endpoint_emits_token_and_done_events() -> None:
             with client.stream(
                 "POST",
                 "/api/v1/estimate/stream",
-                json={"transcription": "x" * 60},
+                json=VALID_BODY,
             ) as response:
                 assert response.status_code == 200
                 body = b"".join(response.iter_bytes()).decode()
@@ -56,7 +54,8 @@ def test_stream_endpoint_emits_token_and_done_events() -> None:
         assert "data: estimator." in body
         assert "event: done" in body
         assert len(stub.calls) == 1
-        assert stub.calls[0]["user_message"] == "x" * 60
+        assert VALID_BODY["description"] in stub.calls[0]["user_message"]
+        assert stub.calls[0]["system_prompt"].startswith("You are a senior software consultant")
     finally:
         app.dependency_overrides.pop(get_llm_wrapper, None)
 
@@ -75,7 +74,7 @@ def test_stream_endpoint_serialises_multiline_chunk_as_multiple_data_lines() -> 
             with client.stream(
                 "POST",
                 "/api/v1/estimate/stream",
-                json={"transcription": "x" * 60},
+                json=VALID_BODY,
             ) as response:
                 assert response.status_code == 200
                 body = b"".join(response.iter_bytes()).decode()
@@ -87,14 +86,14 @@ def test_stream_endpoint_serialises_multiline_chunk_as_multiple_data_lines() -> 
         app.dependency_overrides.pop(get_llm_wrapper, None)
 
 
-def test_stream_endpoint_rejects_short_transcription() -> None:
+def test_stream_endpoint_rejects_short_description() -> None:
     stub = _StubWrapper(chunks=["irrelevant"])
     app.dependency_overrides[get_llm_wrapper] = lambda: stub
     try:
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/estimate/stream",
-                json={"transcription": "too short"},
+                json={**VALID_BODY, "description": "too short"},
             )
         assert response.status_code == 422
     finally:
@@ -117,24 +116,12 @@ def test_stream_endpoint_emits_metrics_before_done() -> None:
             with client.stream(
                 "POST",
                 "/api/v1/estimate/stream",
-                json={"transcription": "x" * 60},
+                json=VALID_BODY,
             ) as response:
                 body = b"".join(response.iter_bytes()).decode()
         assert "event: metrics" in body
         assert body.index("event: metrics") < body.index("event: done")
         data_line = next(line for line in body.splitlines() if line.startswith("data: {"))
-        assert json.loads(data_line[len("data: ") :]) == metrics
+        assert json.loads(data_line[len("data: ") :]) == {**metrics, "prompt_version": "v1"}
     finally:
         app.dependency_overrides.pop(get_llm_wrapper, None)
-
-
-def test_context_endpoint_exposes_system_prompt_and_examples() -> None:
-    with TestClient(app) as client:
-        response = client.get("/api/v1/context")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["system_prompt"].startswith("You are a senior software consultant")
-    assert len(body["examples"]) == 3
-    # Every example shown to the user must actually be inside the prompt.
-    for example in body["examples"]:
-        assert example["meeting_summary"] in body["system_prompt"]

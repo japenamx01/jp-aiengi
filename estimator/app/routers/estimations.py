@@ -3,25 +3,20 @@ import json
 from collections.abc import AsyncIterator
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from app.dependencies import get_llm_wrapper
-from app.context.examples import select_examples
+from app.prompts.loader import (
+    DEFAULT_VERSION,
+    UnknownPromptVersionError,
+    available_versions,
+    render_estimation_prompt,
+)
 from app.schemas.estimation import (
-    ContextExample,
-    ContextResponse,
     EstimationRequest,
     EstimationResponse,
-    StreamEstimationRequest,
-)
-from app.services.evaluation import evaluate_estimation_structure
-from app.services.llm_service import (
-    DEFAULT_NUM_EXAMPLES,
-    GenerationOptions,
-    LLMServiceError,
-    build_system_prompt,
-    generate_estimation,
+    PromptPreview,
 )
 from app.services.llm_wrapper import LLMWrapper
 
@@ -29,57 +24,68 @@ log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1", tags=["estimations"])
 
+PromptVersion = Query(
+    default=DEFAULT_VERSION,
+    description="Prompt template version to render (see GET /api/v1/prompts/versions)",
+)
 
-@router.post("/estimate", response_model=EstimationResponse)
-async def create_estimation(request: EstimationRequest) -> EstimationResponse:
-    """Receive a meeting transcription and return a software project estimation."""
-    opts = GenerationOptions(
-        preprocessing=request.preprocessing,
-        example_format=request.example_format,
-        num_examples=request.num_examples,
-        use_examples=request.use_examples,
-        model=request.model,
-        max_tokens=request.max_tokens,
-        thinking_budget=request.thinking_budget,
-    )
 
+def _render(request: EstimationRequest, version: str) -> tuple[str, str]:
+    """Render the prompt, turning an unknown version into a client error."""
     try:
-        result = generate_estimation(request.transcription, opts)
-    except LLMServiceError as exc:
-        log.error("estimation_endpoint_error", error=str(exc))
-        raise HTTPException(status_code=500, detail=str(exc))
+        return render_estimation_prompt(request, version=version)
+    except UnknownPromptVersionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    validation = (
-        evaluate_estimation_structure(result["estimation"], result["finish_reason"])
-        if request.evaluate
-        else None
+
+# Sync handler on purpose: FastAPI runs it in a worker thread, so the blocking
+# LLM call does not stall the event loop.
+@router.post("/estimate", response_model=EstimationResponse)
+def create_estimation(
+    request: EstimationRequest,
+    prompt_version: str = PromptVersion,
+    wrapper: LLMWrapper = Depends(get_llm_wrapper),
+) -> EstimationResponse:
+    """Estimate a project from the typed form parameters."""
+    system, user = _render(request, prompt_version)
+    try:
+        result = wrapper.complete(system_prompt=system, user_message=user)
+    except Exception as exc:  # noqa: BLE001 — every provider failure maps to 502
+        log.error("estimation_endpoint_error", error=str(exc), error_type=type(exc).__name__)
+        raise HTTPException(status_code=502, detail=f"LLM provider error: {exc}") from exc
+
+    return EstimationResponse(
+        text=result["estimation"],
+        prompt_version=prompt_version,
+        model=result["model"],
+        provider=result["provider"],
+        finish_reason=result["finish_reason"],
+        usage=result["usage"],
+        latency_ms=result["latency_ms"],
+        cache_hit=result.get("cache_hit", False),
+        cost_usd=result.get("cost_usd", 0.0),
     )
-
-    return EstimationResponse(**result, validation=validation)
 
 
 @router.post("/estimate/stream")
 async def create_estimation_stream(
-    request: StreamEstimationRequest,
+    request: EstimationRequest,
+    prompt_version: str = PromptVersion,
     wrapper: LLMWrapper = Depends(get_llm_wrapper),
 ) -> EventSourceResponse:
-    """Stream a software estimation token by token via Server-Sent Events.
+    """Stream the same estimation as POST /estimate token by token via SSE.
 
-    The streaming path is intentionally simpler than POST /estimate: it skips
-    two-phase preprocessing and structural validation, since both fight the UX
-    benefit of streaming (intermediate phase 1 tokens would leak; validation
-    only makes sense over the complete text).
+    Emits ``token`` events, then one ``metrics`` event (JSON, including the
+    ``prompt_version``) and a final ``done``.
     """
-    system_prompt = build_system_prompt()
+    system, user = _render(request, prompt_version)
 
     async def event_generator() -> AsyncIterator[dict]:
         loop = asyncio.get_running_loop()
         metrics: dict = {}
         chunks = wrapper.complete_stream(
-            system_prompt=system_prompt,
-            user_message=request.transcription,
-            model_override=request.model,
-            max_tokens=request.max_tokens,
+            system_prompt=system,
+            user_message=user,
             metrics=metrics,
         )
 
@@ -100,7 +106,10 @@ async def create_estimation_stream(
                 if chunk:
                     yield {"event": "token", "data": chunk}
             if metrics:
-                yield {"event": "metrics", "data": json.dumps(metrics)}
+                yield {
+                    "event": "metrics",
+                    "data": json.dumps({**metrics, "prompt_version": prompt_version}),
+                }
             yield {"event": "done", "data": "[DONE]"}
         except Exception as exc:  # noqa: BLE001
             yield {"event": "error", "data": str(exc)}
@@ -108,21 +117,21 @@ async def create_estimation_stream(
     return EventSourceResponse(event_generator())
 
 
-@router.get("/context", response_model=ContextResponse)
-async def get_context() -> ContextResponse:
-    """Expose the system prompt and reference examples behind /estimate/stream.
+@router.post("/prompt/preview", response_model=PromptPreview)
+async def preview_prompt(
+    request: EstimationRequest,
+    prompt_version: str = PromptVersion,
+) -> PromptPreview:
+    """Return the exact (system, user) messages a request renders to.
 
-    Read-only: lets clients (the Streamlit sidebar) show exactly what CAG injects
-    into every call without duplicating the prompt-building logic.
+    No LLM call: lets clients (the Streamlit sidebar) show what is sent to the
+    model and how it changes with each form parameter or prompt version.
     """
-    return ContextResponse(
-        system_prompt=build_system_prompt(),
-        examples=[
-            ContextExample(
-                title=ex.title,
-                meeting_summary=ex.meeting_summary,
-                estimation_markdown=ex.estimation_markdown,
-            )
-            for ex in select_examples(DEFAULT_NUM_EXAMPLES)
-        ],
-    )
+    system, user = _render(request, prompt_version)
+    return PromptPreview(system=system, user=user, prompt_version=prompt_version)
+
+
+@router.get("/prompts/versions", response_model=list[str])
+async def list_prompt_versions() -> list[str]:
+    """List the available estimation prompt versions."""
+    return available_versions()

@@ -59,9 +59,11 @@ services:
       estimator:
         condition: service_healthy
 
-    # Bind-mount the UI so edits show up after a browser "Rerun".
+    # Bind-mount the UI (and app/, whose Pydantic schemas the form reuses) so
+    # edits show up after a browser "Rerun".
     volumes:
       - ./streamlit_app.py:/app/streamlit_app.py
+      - ./app:/app/app
 
     command: >
       streamlit run streamlit_app.py
