@@ -62,21 +62,40 @@ curl -X POST http://localhost:8000/api/v1/estimate \
 ```
 estimator/
 ├── app/
-│   ├── main.py            # Aplicacion FastAPI, health check, CORS
-│   ├── config.py           # Configuracion con Pydantic Settings
+│   ├── main.py                  # Aplicacion FastAPI, health check, CORS
+│   ├── config.py                # Configuracion con Pydantic Settings
+│   ├── dependencies.py          # Singletons de cache Redis y LLMWrapper (Depends)
 │   ├── routers/
-│   │   └── estimations.py  # Endpoint POST /api/v1/estimate
+│   │   └── estimations.py       # POST /estimate, POST /estimate/stream (SSE + evento
+│   │                            #   metrics) y GET /context (system prompt y ejemplos)
 │   ├── services/
-│   │   └── llm_service.py  # Logica de negocio, llamadas al LLM
+│   │   ├── llm_service.py       # Construccion del system prompt y orquestacion
+│   │   ├── llm_wrapper.py       # LiteLLM Router: fallback primario -> secundario,
+│   │   │                        #   cache, coste y uso de tokens en streaming
+│   │   ├── cache.py             # Cache exact-match en Redis
+│   │   └── evaluation.py        # Validacion estructural de la estimacion
 │   ├── schemas/
-│   │   └── estimation.py   # Modelos Pydantic (request/response)
-│   └── context/
-│       └── examples.py     # Ejemplos de estimacion (contexto CAG)
+│   │   └── estimation.py        # Modelos Pydantic (request/response, contexto CAG)
+│   ├── context/
+│   │   └── examples.py          # Ejemplos de estimacion (contexto CAG)
+│   ├── fixtures/                # Transcripciones de ejemplo (corta y larga)
+│   └── static/
+│       └── sse_demo.html        # Demo HTML del endpoint SSE
 ├── tests/
-│   └── test_health.py      # Tests basicos
-├── Dockerfile              # Build multi-stage con uv
-├── docker-compose.yml      # Configuracion para desarrollo local
-└── pyproject.toml          # Dependencias y configuracion
+│   ├── conftest.py              # Fixture compartida (TestClient de FastAPI)
+│   ├── test_health.py           # Health check
+│   ├── test_estimate_endpoint.py  # POST /estimate
+│   ├── test_estimate_stream.py  # Streaming SSE, evento metrics y GET /context
+│   ├── test_llm_wrapper.py      # Fallback del Router, cache, coste y metricas
+│   ├── test_cache.py            # Cache Redis (fakeredis)
+│   ├── test_evaluation.py       # Validacion estructural
+│   └── test_examples_format.py  # Formatos de los ejemplos (markdown/json/narrativo)
+├── streamlit_app.py             # UI de chat + sidebar (system prompt, ejemplos CAG
+│                                #   y metricas de la ultima llamada)
+├── Dockerfile                   # Build multi-stage con uv (API y Streamlit)
+├── docker-compose.yml           # API, Streamlit y Redis para desarrollo local
+├── .env.example                 # Variables de entorno de referencia
+└── pyproject.toml               # Dependencias y configuracion
 ```
 
 ## Documentacion interactiva
