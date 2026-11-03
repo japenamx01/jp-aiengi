@@ -107,3 +107,18 @@ class StreamEstimationRequest(BaseModel):
     transcription: str = Field(..., min_length=50, description="Meeting transcription text")
     model: str | None = Field(default=None, description="Override the default model")
     max_tokens: int = Field(default=4000, gt=0, le=16000)
+
+
+class ContextExample(BaseModel):
+    """One reference estimation injected into the CAG system prompt."""
+
+    title: str
+    meeting_summary: str
+    estimation_markdown: str
+
+
+class ContextResponse(BaseModel):
+    """Static context the streaming endpoint sends to the model (read-only)."""
+
+    system_prompt: str = Field(..., description="Full system prompt used by /estimate/stream")
+    examples: list[ContextExample] = Field(..., description="Reference estimations in the prompt")

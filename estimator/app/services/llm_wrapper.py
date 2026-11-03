@@ -6,8 +6,10 @@ Design notes
 - The wrapper exposes two primitives: ``complete()`` (blocking, full response) and
   ``complete_stream()`` (yields chunks). Higher-level orchestration (preprocessing,
   validation, prompt building) stays in ``llm_service.py``.
-- The Router is configured with two deployments under the same ``model_name``
-  ("estimator") so LiteLLM can switch from primary to fallback transparently.
+- The Router is configured with two model groups, "estimator" (primary) and
+  "estimator-fallback", linked by ``fallbacks`` so LiteLLM switches to the
+  fallback only when the primary fails. Putting both deployments under the same
+  ``model_name`` would make the Router load-balance between them instead.
   When the caller overrides the model per-request (Session 2 live demos), we
   bypass the Router and call ``litellm.completion`` directly with explicit
   credentials — that path has no fallback by design.
@@ -18,6 +20,7 @@ Design notes
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Iterator
 
@@ -30,6 +33,11 @@ from app.services.cache import EstimationCache
 log = structlog.get_logger()
 
 
+# Router model groups. Each holds a single deployment; see the module docstring.
+PRIMARY_GROUP = "estimator"
+FALLBACK_GROUP = "estimator-fallback"
+
+
 # Cost per 1M tokens (USD). Update as pricing changes.
 MODEL_COSTS: dict[str, dict[str, float]] = {
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -40,9 +48,18 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
 }
 
 
+# Dated snapshots such as ``gpt-4o-mini-2024-07-18`` share the base model's price.
+_SNAPSHOT_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
     base = _normalise_model_name(model)
-    costs = MODEL_COSTS.get(base) or MODEL_COSTS.get(model) or {"input": 0.0, "output": 0.0}
+    costs = (
+        MODEL_COSTS.get(base)
+        or MODEL_COSTS.get(model)
+        or MODEL_COSTS.get(_SNAPSHOT_SUFFIX.sub("", base))
+        or {"input": 0.0, "output": 0.0}
+    )
     return round((tokens_in * costs["input"] + tokens_out * costs["output"]) / 1_000_000, 6)
 
 
@@ -85,7 +102,7 @@ class LLMWrapper:
         self.router = Router(
             model_list=[
                 {
-                    "model_name": "estimator",
+                    "model_name": PRIMARY_GROUP,
                     "litellm_params": {
                         "model": primary_model,
                         "api_key": openai_api_key,
@@ -93,7 +110,7 @@ class LLMWrapper:
                     },
                 },
                 {
-                    "model_name": "estimator",
+                    "model_name": FALLBACK_GROUP,
                     "litellm_params": {
                         "model": fallback_model,
                         "api_key": anthropic_api_key,
@@ -101,7 +118,7 @@ class LLMWrapper:
                     },
                 },
             ],
-            fallbacks=[{"estimator": ["estimator"]}],
+            fallbacks=[{PRIMARY_GROUP: [FALLBACK_GROUP]}],
             num_retries=num_retries,
         )
 
@@ -185,13 +202,17 @@ class LLMWrapper:
         user_message: str,
         model_override: str | None = None,
         max_tokens: int = 4000,
+        metrics: dict[str, Any] | None = None,
     ) -> Iterator[str]:
         """Yield text chunks as they arrive from the model.
 
         Cache hits replay the cached estimation as a single chunk so the client UX
         stays consistent. Cache misses stream live and the full text is cached
-        once the stream finishes (without ``cost_usd`` since LiteLLM does not
-        always report token usage for streaming calls).
+        once the stream finishes, together with the token usage reported in the
+        final chunk (requested via ``stream_options.include_usage``).
+
+        When ``metrics`` is given, it is filled once the stream is exhausted with
+        the model, usage, latency and cache flag of the call.
         """
         cache_key_model = model_override or self.primary_model
         cache_key = EstimationCache.make_key(
@@ -205,6 +226,8 @@ class LLMWrapper:
         if cached:
             log.info("stream_cache_hit", chars=len(cached.get("estimation", "")))
             yield cached.get("estimation", "")
+            if metrics is not None:
+                metrics.update(_stream_metrics(cached, cache_hit=True))
             return
 
         messages = [
@@ -225,9 +248,17 @@ class LLMWrapper:
         )
         t0 = time.perf_counter()
         full_text: list[str] = []
+        model = model_override or self.primary_model
+        input_tokens = output_tokens = 0
         try:
             response = self._dispatch(model_override=model_override, **kwargs)
             for chunk in response:
+                # The served model may differ from the primary one after a fallback.
+                model = getattr(chunk, "model", None) or model
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    input_tokens = getattr(usage, "prompt_tokens", 0) or input_tokens
+                    output_tokens = getattr(usage, "completion_tokens", 0) or output_tokens
                 delta = _extract_delta(chunk)
                 if delta:
                     full_text.append(delta)
@@ -244,20 +275,32 @@ class LLMWrapper:
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
         rendered = "".join(full_text)
-        log.info("llm_stream_completed", latency_ms=latency_ms, chars=len(rendered))
-
-        self.cache.set(
-            cache_key,
-            {
-                "estimation": rendered,
-                "model": model_override or self.primary_model,
-                "provider": _provider_from_model(model_override or self.primary_model),
-                "finish_reason": "stop",
-                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                "latency_ms": latency_ms,
-                "cost_usd": 0.0,
+        model = _normalise_model_name(model)
+        result = {
+            "estimation": rendered,
+            "model": model,
+            "provider": _provider_from_model(model),
+            "finish_reason": "stop",
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
             },
+            "latency_ms": latency_ms,
+            "cost_usd": _estimate_cost(model, input_tokens, output_tokens),
+        }
+        log.info(
+            "llm_stream_completed",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            chars=len(rendered),
         )
+
+        self.cache.set(cache_key, result)
+        if metrics is not None:
+            metrics.update(_stream_metrics(result, cache_hit=False))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -278,6 +321,7 @@ class LLMWrapper:
         }
         if stream:
             kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
 
         if thinking_budget is not None:
             target_model = model_override or self.primary_model
@@ -308,7 +352,7 @@ class LLMWrapper:
                 num_retries=self.num_retries,
                 **kwargs,
             )
-        return self.router.completion(model="estimator", **kwargs)
+        return self.router.completion(model=PRIMARY_GROUP, **kwargs)
 
     @staticmethod
     def _normalise_response(response: Any, *, latency_ms: int) -> dict[str, Any]:
@@ -335,6 +379,18 @@ class LLMWrapper:
             "latency_ms": latency_ms,
             "cost_usd": _estimate_cost(model, input_tokens, output_tokens),
         }
+
+
+def _stream_metrics(result: dict[str, Any], *, cache_hit: bool) -> dict[str, Any]:
+    """Project a cached/normalised result onto the metrics shape sent to clients."""
+    return {
+        "model": result.get("model"),
+        "provider": result.get("provider"),
+        "usage": result.get("usage", {}),
+        "latency_ms": result.get("latency_ms", 0),
+        "cost_usd": result.get("cost_usd", 0.0),
+        "cache_hit": cache_hit,
+    }
 
 
 def _extract_delta(chunk: Any) -> str:

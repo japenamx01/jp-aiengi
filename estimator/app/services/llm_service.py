@@ -20,6 +20,7 @@ log = structlog.get_logger()
 
 DEFAULT_MAX_TOKENS = 4000
 EXTRACTION_MAX_TOKENS = 1500
+DEFAULT_NUM_EXAMPLES = 3
 
 
 class LLMServiceError(Exception):
@@ -85,7 +86,7 @@ class GenerationOptions:
 
     preprocessing: PreprocessingMode = "none"
     example_format: ExampleFormat = "markdown"
-    num_examples: int = 3
+    num_examples: int = DEFAULT_NUM_EXAMPLES
     use_examples: bool = True
     model: str | None = None
     max_tokens: int = DEFAULT_MAX_TOKENS
@@ -99,7 +100,7 @@ class GenerationOptions:
 
 def build_system_prompt(
     example_format: ExampleFormat = "markdown",
-    num_examples: int = 3,
+    num_examples: int = DEFAULT_NUM_EXAMPLES,
     use_examples: bool = True,
     inline_cleaning: bool = False,
 ) -> str:

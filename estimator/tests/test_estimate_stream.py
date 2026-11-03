@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 
 from fastapi.testclient import TestClient
@@ -9,8 +10,9 @@ from app.main import app
 class _StubWrapper:
     """Minimal stand-in for LLMWrapper that yields canned chunks."""
 
-    def __init__(self, chunks: list[str]) -> None:
+    def __init__(self, chunks: list[str], metrics: dict | None = None) -> None:
         self._chunks = chunks
+        self._metrics = metrics or {}
         self.calls: list[dict] = []
 
     def complete_stream(
@@ -20,6 +22,7 @@ class _StubWrapper:
         user_message: str,
         model_override: str | None,
         max_tokens: int,
+        metrics: dict | None = None,
     ) -> Iterator[str]:
         self.calls.append(
             {
@@ -31,6 +34,8 @@ class _StubWrapper:
         )
         for chunk in self._chunks:
             yield chunk
+        if metrics is not None:
+            metrics.update(self._metrics)
 
 
 def test_stream_endpoint_emits_token_and_done_events() -> None:
@@ -94,3 +99,42 @@ def test_stream_endpoint_rejects_short_transcription() -> None:
         assert response.status_code == 422
     finally:
         app.dependency_overrides.pop(get_llm_wrapper, None)
+
+
+def test_stream_endpoint_emits_metrics_before_done() -> None:
+    metrics = {
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
+        "latency_ms": 4200,
+        "cost_usd": 0.00036,
+        "cache_hit": False,
+    }
+    stub = _StubWrapper(chunks=["Hello"], metrics=metrics)
+    app.dependency_overrides[get_llm_wrapper] = lambda: stub
+    try:
+        with TestClient(app) as client:
+            with client.stream(
+                "POST",
+                "/api/v1/estimate/stream",
+                json={"transcription": "x" * 60},
+            ) as response:
+                body = b"".join(response.iter_bytes()).decode()
+        assert "event: metrics" in body
+        assert body.index("event: metrics") < body.index("event: done")
+        data_line = next(line for line in body.splitlines() if line.startswith("data: {"))
+        assert json.loads(data_line[len("data: ") :]) == metrics
+    finally:
+        app.dependency_overrides.pop(get_llm_wrapper, None)
+
+
+def test_context_endpoint_exposes_system_prompt_and_examples() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/v1/context")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["system_prompt"].startswith("You are a senior software consultant")
+    assert len(body["examples"]) == 3
+    # Every example shown to the user must actually be inside the prompt.
+    for example in body["examples"]:
+        assert example["meeting_summary"] in body["system_prompt"]

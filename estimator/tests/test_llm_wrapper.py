@@ -5,7 +5,7 @@ import fakeredis
 import pytest
 
 from app.services.cache import EstimationCache
-from app.services.llm_wrapper import LLMWrapper, _estimate_cost
+from app.services.llm_wrapper import FALLBACK_GROUP, PRIMARY_GROUP, LLMWrapper, _estimate_cost
 
 
 def _fake_completion(model: str, content: str = "the answer", input_tokens: int = 100, output_tokens: int = 50):
@@ -155,3 +155,64 @@ def test_complete_stream_yields_chunks_and_caches(wrapper: LLMWrapper) -> None:
         )
     assert router_call.call_count == 0
     assert "".join(replayed) == "Hello world"
+
+
+def test_complete_stream_reports_usage_metrics_and_caches_them(wrapper: LLMWrapper) -> None:
+    chunks = [
+        SimpleNamespace(
+            model="gpt-4o-mini-2024-07-18",
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="Hi"))],
+            usage=None,
+        ),
+        # OpenAI sends usage in a final chunk with no choices when include_usage is set.
+        SimpleNamespace(
+            model="gpt-4o-mini-2024-07-18",
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=200),
+        ),
+    ]
+    metrics: dict = {}
+    with patch.object(wrapper.router, "completion", return_value=iter(chunks)) as call:
+        list(
+            wrapper.complete_stream(
+                system_prompt="sys",
+                user_message="usr",
+                max_tokens=4000,
+                metrics=metrics,
+            )
+        )
+    assert call.call_args.kwargs["stream_options"] == {"include_usage": True}
+    assert metrics["model"] == "gpt-4o-mini-2024-07-18"
+    assert metrics["usage"] == {"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200}
+    assert metrics["cost_usd"] == _estimate_cost("gpt-4o-mini", 1000, 200)
+    assert metrics["cache_hit"] is False
+
+    cached_metrics: dict = {}
+    list(
+        wrapper.complete_stream(
+            system_prompt="sys",
+            user_message="usr",
+            max_tokens=4000,
+            metrics=cached_metrics,
+        )
+    )
+    assert cached_metrics["cache_hit"] is True
+    assert cached_metrics["usage"] == metrics["usage"]
+
+
+def test_estimate_cost_resolves_dated_snapshots() -> None:
+    assert _estimate_cost("gpt-4o-mini-2024-07-18", 1_000_000, 0) == 0.15
+
+
+def test_router_always_picks_primary_and_falls_back_on_failure(wrapper: LLMWrapper) -> None:
+    # The primary group must hold only the primary model, otherwise the Router
+    # load-balances and sends healthy traffic to the (pricier) fallback.
+    picked = {
+        wrapper.router.get_available_deployment(model=PRIMARY_GROUP)["litellm_params"]["model"]
+        for _ in range(50)
+    }
+    assert picked == {"gpt-4o-mini"}
+    assert wrapper.router.fallbacks == [{PRIMARY_GROUP: [FALLBACK_GROUP]}]
+
+    fallback = wrapper.router.get_available_deployment(model=FALLBACK_GROUP)
+    assert fallback["litellm_params"]["model"] == "claude-haiku-4-5-20251001"

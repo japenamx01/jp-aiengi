@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 
 import structlog
@@ -6,13 +7,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.dependencies import get_llm_wrapper
+from app.context.examples import select_examples
 from app.schemas.estimation import (
+    ContextExample,
+    ContextResponse,
     EstimationRequest,
     EstimationResponse,
     StreamEstimationRequest,
 )
 from app.services.evaluation import evaluate_estimation_structure
 from app.services.llm_service import (
+    DEFAULT_NUM_EXAMPLES,
     GenerationOptions,
     LLMServiceError,
     build_system_prompt,
@@ -69,11 +74,13 @@ async def create_estimation_stream(
 
     async def event_generator() -> AsyncIterator[dict]:
         loop = asyncio.get_running_loop()
+        metrics: dict = {}
         chunks = wrapper.complete_stream(
             system_prompt=system_prompt,
             user_message=request.transcription,
             model_override=request.model,
             max_tokens=request.max_tokens,
+            metrics=metrics,
         )
 
         def _next_chunk() -> str | None:
@@ -92,8 +99,30 @@ async def create_estimation_stream(
                     break
                 if chunk:
                     yield {"event": "token", "data": chunk}
+            if metrics:
+                yield {"event": "metrics", "data": json.dumps(metrics)}
             yield {"event": "done", "data": "[DONE]"}
         except Exception as exc:  # noqa: BLE001
             yield {"event": "error", "data": str(exc)}
 
     return EventSourceResponse(event_generator())
+
+
+@router.get("/context", response_model=ContextResponse)
+async def get_context() -> ContextResponse:
+    """Expose the system prompt and reference examples behind /estimate/stream.
+
+    Read-only: lets clients (the Streamlit sidebar) show exactly what CAG injects
+    into every call without duplicating the prompt-building logic.
+    """
+    return ContextResponse(
+        system_prompt=build_system_prompt(),
+        examples=[
+            ContextExample(
+                title=ex.title,
+                meeting_summary=ex.meeting_summary,
+                estimation_markdown=ex.estimation_markdown,
+            )
+            for ex in select_examples(DEFAULT_NUM_EXAMPLES)
+        ],
+    )
