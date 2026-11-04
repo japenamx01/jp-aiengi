@@ -2,7 +2,8 @@
 
 The client no longer sends free text to a chat: a form produces a typed
 ``EstimationRequest`` (the same Pydantic model the service validates against)
-and POSTs it to ``/api/v1/estimate``. The endpoint URL is read from
+and POSTs it to ``/api/v1/estimate`` (or to ``/api/v1/estimate/stream`` when
+streaming is on, so the text appears while it is generated). The endpoint URL is read from
 ``ESTIMATOR_API_BASE_URL`` (loaded from the same ``.env`` as the API), so the
 same UI works against a local uvicorn or against docker-compose.
 
@@ -23,8 +24,10 @@ Consecuencias que verás en el código:
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -41,6 +44,7 @@ load_dotenv()
 
 API_BASE_URL = os.getenv("ESTIMATOR_API_BASE_URL", "http://localhost:8000").rstrip("/")
 ESTIMATE_ENDPOINT = f"{API_BASE_URL}/api/v1/estimate"
+STREAM_ENDPOINT = f"{API_BASE_URL}/api/v1/estimate/stream"
 PREVIEW_ENDPOINT = f"{API_BASE_URL}/api/v1/prompt/preview"
 VERSIONS_ENDPOINT = f"{API_BASE_URL}/api/v1/prompts/versions"
 
@@ -102,6 +106,64 @@ def _first_error(exc: ValidationError) -> str:
     return f"{err['loc'][0]}: {err['msg']}"
 
 
+def stream_estimation(payload: dict, params: dict, metrics: dict) -> Iterator[str]:
+    """POST to the SSE endpoint and yield text chunks as they arrive.
+
+    The ``metrics`` event sent before ``done`` is merged into ``metrics``; an
+    ``error`` event is raised so the caller shows it like any other failure.
+    """
+    # NOTA: así se ve el flujo SSE que manda el servidor (ver routers/estimations.py):
+    #
+    #     event: token          ← un trozo de texto (se repite muchas veces)
+    #     data: Fase 1 — 40 h
+    #                           ← línea en blanco = fin del mensaje
+    #     event: metrics        ← un único JSON con modelo, tokens, caché...
+    #     data: {"model": "gpt-4o-mini", ...}
+    #
+    #     event: done
+    #     data: [DONE]
+    #
+    # httpx.stream() NO espera a la respuesta completa: iter_lines() va
+    # entregando líneas según llegan por la red. Esta función es un GENERADOR
+    # (usa yield): st.write_stream la consume y pinta cada trozo al instante.
+    with httpx.stream(
+        "POST",
+        STREAM_ENDPOINT,
+        json=payload,
+        params=params,
+        timeout=httpx.Timeout(120.0, connect=10.0),
+        headers={"Accept": "text/event-stream"},
+    ) as response:
+        # NOTA: un 422 (formulario o versión inválidos) llega ANTES de empezar el
+        # stream, como respuesta HTTP normal. response.read() carga el cuerpo
+        # para que _error_detail pueda leer el "detail" del JSON.
+        if response.is_error:
+            response.read()
+        response.raise_for_status()
+        event = "token"
+        data_lines: list[str] = []
+        for line in response.iter_lines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                # Exactly one space after "data:" is framing, not payload.
+                data_lines.append(line[6:] if line.startswith("data: ") else line[5:])
+            elif line == "" and data_lines:
+                # NOTA: según el estándar SSE, un mensaje con saltos de línea
+                # llega partido en varias líneas "data:"; se unen con "\n".
+                data = "\n".join(data_lines)
+                data_lines = []
+                if event == "token":
+                    yield data
+                elif event == "metrics":
+                    metrics.update(json.loads(data))
+                elif event == "error":
+                    raise RuntimeError(data)
+                elif event == "done":
+                    return
+                event = "token"
+
+
 # NOTA: inicialización de session_state en un único sitio. Solo se ejecuta la
 # primera vez (cuando la clave aún no existe); en las re-ejecuciones siguientes
 # se conservan los valores guardados de la llamada anterior.
@@ -145,7 +207,22 @@ with st.form("estimation_form"):
         required=True,
         help="v2 uses a client-facing tone with an executive summary.",
     )
+    # NOTA: con streaming se usa POST /estimate/stream (SSE) y el texto se va
+    # pintando mientras el modelo lo genera. Sin él, POST /estimate devuelve la
+    # respuesta completa de golpe. Mismo prompt, misma caché: solo cambia el
+    # transporte. Compara el "Response time" del sidebar con ambas opciones:
+    # el total es parecido, pero con streaming el primer texto aparece enseguida.
+    streaming = st.toggle(
+        "Stream the answer",
+        value=True,
+        help="Show the text while it is generated (Server-Sent Events).",
+    )
     submitted = st.form_submit_button("Estimate", type="primary", icon=":material/calculate:")
+
+# NOTA: hueco reservado para la respuesta. El streaming escribe aquí mientras
+# llega el texto y, al final del script, el resultado guardado se dibuja en el
+# MISMO hueco (lo reemplaza), así la respuesta no aparece duplicada.
+output = st.empty()
 
 # NOTA: ``submitted`` solo es True en la re-ejecución causada por el botón.
 if submitted:
@@ -167,23 +244,33 @@ if submitted:
         params = {"prompt_version": prompt_version}
         started = time.perf_counter()
         try:
-            with st.spinner("Estimating..."):
-                response = httpx.post(
-                    ESTIMATE_ENDPOINT,
-                    json=payload,
-                    params=params,
-                    timeout=httpx.Timeout(120.0, connect=10.0),
-                )
-                response.raise_for_status()
-                elapsed_s = time.perf_counter() - started
-                # NOTA: segunda llamada, sin coste de tokens: pide el prompt
-                # renderizado para enseñarlo en el sidebar ("Prompt sent").
-                preview = httpx.post(PREVIEW_ENDPOINT, json=payload, params=params, timeout=10.0)
-                preview.raise_for_status()
-        except httpx.HTTPError as exc:
-            st.error(_error_detail(exc), title=f"Could not get an estimation from {API_BASE_URL}")
+            if streaming:
+                metrics: dict = {}
+                with output.container(border=True):
+                    # NOTA: st.write_stream recorre el generador, pinta cada
+                    # trozo según llega y al terminar devuelve el texto completo.
+                    text = st.write_stream(stream_estimation(payload, params, metrics))
+                result = {"text": text, "prompt_version": prompt_version, **metrics}
+            else:
+                with st.spinner("Estimating..."):
+                    response = httpx.post(
+                        ESTIMATE_ENDPOINT,
+                        json=payload,
+                        params=params,
+                        timeout=httpx.Timeout(120.0, connect=10.0),
+                    )
+                    response.raise_for_status()
+                result = response.json()
+            elapsed_s = time.perf_counter() - started
+            # NOTA: segunda llamada, sin coste de tokens: pide el prompt
+            # renderizado para enseñarlo en el sidebar ("Prompt sent").
+            preview = httpx.post(PREVIEW_ENDPOINT, json=payload, params=params, timeout=10.0)
+            preview.raise_for_status()
+        except (httpx.HTTPError, RuntimeError) as exc:
+            output.empty()
+            detail = _error_detail(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
+            st.error(detail, title=f"Could not get an estimation from {API_BASE_URL}")
         else:
-            result = response.json()
             st.session_state.result = result
             # Client-side wall time: what the user waited, cache hits included.
             st.session_state.last_metrics = {**result, "elapsed_s": elapsed_s}
@@ -191,7 +278,7 @@ if submitted:
 
 if st.session_state.result is not None:
     result = st.session_state.result
-    with st.container(border=True):
+    with output.container(border=True):
         st.markdown(result["text"])
     st.caption(f"Prompt version `{result['prompt_version']}`")
 
@@ -227,7 +314,7 @@ with st.sidebar:
         st.metric(
             "Response time",
             f"{last['elapsed_s']:.2f} s",
-            help="Measured in the browser session, from request to response.",
+            help="Measured in the browser session, from request to the end of the answer.",
             border=True,
         )
         if last.get("cache_hit"):
