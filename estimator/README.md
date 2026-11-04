@@ -109,7 +109,7 @@ estimator/
 │   └── test_cache.py            # Cache Redis (fakeredis)
 ├── assets/
 │   └── session4-form.png        # Captura de la interfaz de la sesion 4
-├── streamlit_app.py             # Formulario tipado + sidebar (metricas y prompt enviado)
+├── streamlit_app.py             # Formulario tipado (streaming opcional) + sidebar
 ├── Dockerfile                   # Build multi-stage con uv (API y Streamlit)
 ├── docker-compose.yml           # API, Streamlit y Redis para desarrollo local
 ├── .env.example                 # Variables de entorno de referencia
@@ -148,6 +148,36 @@ El estimador deja de ser un chat. Dos cambios que nacen de la misma decision:
 `render_estimation_prompt(request, version="v1")` usa `StrictUndefined` (una variable
 mal escrita rompe el render en vez de producir un hueco vacio), `trim_blocks` y
 `lstrip_blocks`. El endpoint envia `system` y `user` como mensajes separados.
+
+### El formulario (Streamlit)
+
+- **Campos:** descripcion, tipo de proyecto, nivel de detalle, formato de salida y
+  version del prompt (la lista sale de `GET /api/v1/prompts/versions`).
+- **Stream the answer** (activado por defecto): llama a `POST /api/v1/estimate/stream`
+  y pinta el texto con `st.write_stream` mientras el modelo lo genera. Desactivado,
+  usa `POST /api/v1/estimate` y muestra la respuesta completa de golpe. Es el mismo
+  prompt y la misma cache: solo cambia el transporte. Las metricas del sidebar salen
+  del evento `metrics` del stream o del `EstimationResponse`.
+- **Sidebar:** modelo que respondio, version del prompt, tokens de entrada y salida,
+  tiempo de respuesta, aviso *Served from Redis cache* y los mensajes `system` / `user`
+  exactos enviados (via `POST /api/v1/prompt/preview`, sin coste de tokens).
+- **Clear result** solo limpia la pantalla (`st.session_state`); **no** borra la cache
+  de Redis, que es compartida por todos los clientes. Para forzar una llamada real,
+  cambia algun parametro del formulario o borra la cache (ver
+  [Verificar la cache](#verificar-la-cache)).
+
+### Notas didacticas en el codigo
+
+El codigo de la sesion lleva comentarios `NOTA:` en espanol que explican que hace cada
+pieza y por que (loader Jinja2, templates, schemas, router, SSE, Streamlit, tests,
+cache y Router). Para recorrerlas:
+
+```bash
+grep -rn "NOTA" app/ tests/ streamlit_app.py
+```
+
+En los `.j2` las notas son comentarios Jinja (`{#  #}`), que **no** llegan al modelo:
+el prompt renderizado es identico con y sin ellas.
 
 ### Versionado de prompts
 
@@ -261,6 +291,9 @@ curl -s localhost:8000/api/v1/estimate -H 'Content-Type: application/json' \
 
 # Inspeccionar las claves en Redis
 docker compose exec redis redis-cli KEYS 'estimation:*'
+
+# Borrar solo las estimaciones cacheadas (o todo Redis con FLUSHDB)
+docker compose exec redis sh -c 'redis-cli --scan --pattern "estimation:*" | xargs -r redis-cli del'
 ```
 
 ### Streamlit
