@@ -1,0 +1,11 @@
+{#
+  NOTA: user.j2 = los DATOS del usuario, separados de las instrucciones.
+  Las etiquetas <project_description> marcan dónde empieza y acaba el texto
+  del usuario: el system.j2 le dice al modelo que la descripción viene ahí,
+  así distingue "datos a estimar" de "órdenes que debo seguir".
+#}
+<project_description>
+{{ description }}
+</project_description>
+
+Estimate the project described above.
