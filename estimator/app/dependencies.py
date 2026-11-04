@@ -1,4 +1,12 @@
-"""FastAPI dependency factories for shared singletons (cache and LLM wrapper)."""
+"""FastAPI dependency factories for shared singletons (cache and LLM wrapper).
+
+NOTA: @lru_cache sin argumentos convierte la función en un "singleton": la
+primera llamada crea el objeto y las siguientes devuelven EL MISMO. Así hay
+una sola conexión a Redis y un solo Router de LiteLLM para todo el proceso, en
+vez de crear uno por petición. Los endpoints lo piden con
+``Depends(get_llm_wrapper)`` y los tests lo sustituyen con
+``app.dependency_overrides``.
+"""
 
 from __future__ import annotations
 

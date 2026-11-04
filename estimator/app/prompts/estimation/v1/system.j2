@@ -1,3 +1,20 @@
+{#
+  NOTA: system.j2 = las INSTRUCCIONES para el modelo (rol, reglas, formato).
+  Sintaxis Jinja2 que vas a ver aquí:
+    {{ variable }}           → imprime el valor (viene del EstimationRequest).
+    {% if x == "a" %}...{% elif %}...{% endif %}  → solo se incluye un bloque.
+    {% set nombre = ... %}   → define una variable local al template.
+    {% include "ruta" %}     → pega aquí el contenido de otro template.
+    llave+almohadilla        → comentario (como este bloque): NO aparece en el
+                               prompt final. No se pueden anidar: escribir la
+                               etiqueta de cierre dentro lo cerraría antes.
+  Las variables disponibles son las claves de request.model_dump(mode="json"):
+  description, project_type, detail_level, output_format.
+  Pruébalo sin gastar tokens: POST /api/v1/prompt/preview en /docs.
+#}
+{# NOTA: diccionarios definidos dentro del template. Traducen el valor del
+   enum ("mobile_app") a texto natural para el modelo. Al vivir aquí y no en
+   Python, cambiar esta redacción es editar el prompt, no el código. #}
 {% set project_labels = {
     "mobile_app": "a mobile application",
     "web_saas": "a multi-tenant web SaaS product",
@@ -19,6 +36,9 @@ General rules:
 - Always end with the total hours, the total cost in EUR, the recommended team and the estimated duration in weeks.
 - Answer in the same language as the project description.
 
+{# NOTA: bloque condicional por output_format. Solo UNO de los tres llega al
+   modelo. Los tests verifican, p. ej., que "confidence_pct" aparece con
+   phases_table y NO con narrative (tests/prompts/test_estimation_v1.py). #}
 ## Output format: {{ output_format }}
 {% if output_format == "phases_table" %}
 Organise the work into delivery phases and present them as a Markdown table with exactly these columns:
@@ -36,6 +56,9 @@ Group the line items under short headings when it improves readability. Finish w
 Write the estimation as flowing prose in a few short paragraphs, as you would in a proposal email to the client. Do not use tables or bullet lists; mention the hours and costs of the main pieces of work inside the sentences.
 {% endif %}
 
+{# NOTA: segundo eje, independiente del formato: 3 formatos × 3 niveles × 4
+   tipos de proyecto = 36 prompts distintos desde un solo template. Con
+   "detailed" se añade la instrucción de listar asunciones por fase. #}
 ## Level of detail: {{ detail_level }}
 {% if detail_level == "summary" %}
 Keep it brief: only the main phases or tasks and the totals, in no more than 150 words. Skip explanations.
@@ -48,4 +71,8 @@ Be thorough: break every phase down into its concrete tasks, list the assumption
 ## Reference estimations
 Below are estimations from previous projects. Use them as a guide for structure, level of detail and realistic pricing, but adapt everything to the project you receive.
 
+{# NOTA: el include usa la ruta completa con la versión ("estimation/v1/...")
+   a propósito: cada versión decide qué ejemplos usa y v1 queda congelada
+   aunque mañana cambien los ejemplos de v2. Los templates incluidos ven las
+   mismas variables (output_format, detail_level...) que este. #}
 {% include "estimation/v1/examples.j2" %}

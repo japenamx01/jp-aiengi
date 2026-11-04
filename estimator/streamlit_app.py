@@ -8,6 +8,17 @@ same UI works against a local uvicorn or against docker-compose.
 
 The sidebar shows the metrics of the last call and the exact system/user
 messages it rendered to, fetched from ``POST /api/v1/prompt/preview``.
+
+NOTA: cómo "piensa" Streamlit
+-----------------------------
+Streamlit vuelve a ejecutar ESTE SCRIPT ENTERO de arriba abajo cada vez que el
+usuario interactúa (pulsa un botón, cambia un widget...). No hay callbacks ni
+rutas como en una web clásica: el script se re-ejecuta y redibuja la página.
+Consecuencias que verás en el código:
+  - Lo que deba sobrevivir entre ejecuciones se guarda en ``st.session_state``.
+  - Lo caro de calcular se cachea con ``@st.cache_data``.
+  - Dentro de un ``st.form`` los widgets NO provocan re-ejecuciones al cambiar;
+    solo el botón de enviar lo hace. Así no se llama a la API a cada tecla.
 """
 
 from __future__ import annotations
@@ -21,6 +32,9 @@ import streamlit as st
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
+# NOTA: el cliente importa las MISMAS clases Pydantic que valida el servicio.
+# Un solo contrato compartido: si mañana cambia un enum, cliente y servicio se
+# enteran a la vez, y los errores se detectan antes de salir del navegador.
 from app.schemas.estimation import DetailLevel, EstimationRequest, OutputFormat, ProjectType
 
 load_dotenv()
@@ -30,6 +44,9 @@ ESTIMATE_ENDPOINT = f"{API_BASE_URL}/api/v1/estimate"
 PREVIEW_ENDPOINT = f"{API_BASE_URL}/api/v1/prompt/preview"
 VERSIONS_ENDPOINT = f"{API_BASE_URL}/api/v1/prompts/versions"
 
+# NOTA: el usuario ve textos amigables ("Phases table") pero el widget
+# devuelve el enum (OutputFormat.PHASES_TABLE). format_func=LABELS.get hace la
+# traducción solo para mostrar; el valor real nunca cambia.
 LABELS: dict[Any, str] = {
     ProjectType.MOBILE_APP: "Mobile app",
     ProjectType.WEB_SAAS: "Web SaaS",
@@ -51,6 +68,9 @@ st.caption(
 )
 
 
+# NOTA: como el script se re-ejecuta en cada interacción, sin caché haríamos
+# una petición HTTP a /prompts/versions cada vez. Con ttl=60 se pide como mucho
+# una vez por minuto; si añades v3 en el servidor, aparece en <= 60 s.
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_versions() -> list[str]:
     """Prompt versions offered by the API; falls back to v1 if it is down."""
@@ -64,6 +84,8 @@ def fetch_versions() -> list[str]:
 
 def _error_detail(exc: httpx.HTTPError) -> str:
     """Prefer the API's own error message over httpx's generic one."""
+    # NOTA: httpx diría "Client error '422 Unprocessable Entity'..." (poco útil).
+    # FastAPI manda el motivo real en el campo "detail" del JSON; lo mostramos.
     if isinstance(exc, httpx.HTTPStatusError):
         try:
             return str(exc.response.json().get("detail", exc))
@@ -73,10 +95,16 @@ def _error_detail(exc: httpx.HTTPError) -> str:
 
 
 def _first_error(exc: ValidationError) -> str:
+    # NOTA: exc.errors() es una lista de dicts como
+    # {"loc": ("description",), "msg": "String should have at least 20 characters"}.
+    # Mostramos el primero en formato "campo: motivo".
     err = exc.errors()[0]
     return f"{err['loc'][0]}: {err['msg']}"
 
 
+# NOTA: inicialización de session_state en un único sitio. Solo se ejecuta la
+# primera vez (cuando la clave aún no existe); en las re-ejecuciones siguientes
+# se conservan los valores guardados de la llamada anterior.
 if "result" not in st.session_state:
     st.session_state.result = None
     st.session_state.last_metrics = None
@@ -84,6 +112,9 @@ if "result" not in st.session_state:
 
 versions = fetch_versions()
 
+# NOTA: cada widget del formulario corresponde a un campo de EstimationRequest.
+# segmented_control con required=True obliga a tener siempre una opción
+# elegida (sin required, el usuario podría desmarcarla y devolvería None).
 with st.form("estimation_form"):
     description = st.text_area(
         "Project description",
@@ -116,7 +147,10 @@ with st.form("estimation_form"):
     )
     submitted = st.form_submit_button("Estimate", type="primary", icon=":material/calculate:")
 
+# NOTA: ``submitted`` solo es True en la re-ejecución causada por el botón.
 if submitted:
+    # NOTA: validación en el cliente con la misma clase Pydantic. Si la
+    # descripción es corta, se avisa aquí sin llegar a llamar a la API.
     try:
         request = EstimationRequest(
             description=description.strip(),
@@ -127,6 +161,8 @@ if submitted:
     except ValidationError as exc:
         st.warning(_first_error(exc), title="Check the form")
     else:
+        # NOTA: mode="json" convierte los enums en sus strings ("mobile_app"),
+        # que es exactamente lo que espera la API en el body JSON.
         payload = request.model_dump(mode="json")
         params = {"prompt_version": prompt_version}
         started = time.perf_counter()
@@ -140,6 +176,8 @@ if submitted:
                 )
                 response.raise_for_status()
                 elapsed_s = time.perf_counter() - started
+                # NOTA: segunda llamada, sin coste de tokens: pide el prompt
+                # renderizado para enseñarlo en el sidebar ("Prompt sent").
                 preview = httpx.post(PREVIEW_ENDPOINT, json=payload, params=params, timeout=10.0)
                 preview.raise_for_status()
         except httpx.HTTPError as exc:
@@ -158,6 +196,8 @@ if st.session_state.result is not None:
     st.caption(f"Prompt version `{result['prompt_version']}`")
 
 
+# NOTA: el sidebar se dibuja AL FINAL del script a propósito: así, en la misma
+# ejecución en la que llega la respuesta, ya puede mostrar sus métricas.
 with st.sidebar:
     st.header("Service")
     st.code(ESTIMATE_ENDPOINT, language="text")

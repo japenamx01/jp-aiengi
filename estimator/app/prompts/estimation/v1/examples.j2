@@ -2,6 +2,15 @@
   Few-shot reference estimations. The data is defined once and rendered in the
   same output_format / detail_level the user asked for, so the examples never
   contradict the format instructions in system.j2.
+
+  NOTA: "few-shot" = mostrar al modelo unos pocos ejemplos resueltos para que
+  imite su estructura y su nivel de precios. Idea clave de este archivo:
+  separar DATOS (la lista `examples`) de PRESENTACIÓN (los bloques if de
+  abajo). Si el usuario pide "narrative", los ejemplos también salen en prosa;
+  si los ejemplos fueran siempre una tabla, contradirían la instrucción de
+  "no uses tablas" y el modelo tendería a copiar la tabla.
+  Ojo: los modelos imitan MUCHO los ejemplos (fases, horas...). Por eso son
+  proyectos distintos entre sí y distintos de lo que suele pedir el usuario.
 #}
 {# Lower-case the first letter for mid-sentence use, but keep acronyms ("UX", "REST"). #}
 {% macro decap(items, sep) %}{% for i in items %}{{ i[:1] | lower if i[1:2].islower() else i[:1] }}{{ i[1:] }}{% if not loop.last %}{{ sep }}{% endif %}{% endfor %}{% endmacro %}
@@ -67,6 +76,9 @@
     "weeks": 6,
   },
 ] %}
+{# NOTA: los totales se calculan con el filtro sum(attribute=...) en vez de
+   escribirlos a mano: así nunca hay un ejemplo cuyas fases no sumen el total
+   (un ejemplo incoherente enseñaría al modelo a ser incoherente). #}
 {% for ex in examples %}
 {% set total_hours = ex.phases | sum(attribute="hours") %}
 {% set total_cost = ex.phases | sum(attribute="cost") %}
@@ -75,6 +87,8 @@ Project description:
 {{ ex.summary }}
 
 Estimation:
+{# NOTA: mismo dato, tres presentaciones. Solo se renderiza la rama que
+   coincide con el output_format pedido por el usuario. #}
 {% if output_format == "phases_table" %}
 | Phase | Hours | Cost (EUR) | confidence_pct |
 |-------|------:|-----------:|---------------:|

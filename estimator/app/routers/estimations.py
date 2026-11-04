@@ -1,3 +1,17 @@
+"""HTTP layer: turns typed form requests into LLM calls.
+
+NOTA: este archivo es "pegamento". No construye prompts (eso es el loader) ni
+habla con OpenAI/Anthropic (eso es el wrapper). Cada endpoint hace siempre los
+mismos tres pasos:
+
+    1. FastAPI valida el body contra EstimationRequest (si falla → 422 solo).
+    2. render_estimation_prompt() convierte el request en (system, user).
+    3. El LLMWrapper hace la llamada (con caché y fallback) y se devuelve.
+
+Separar responsabilidades así permite testear cada pieza por su cuenta: los
+tests de template no necesitan HTTP, y los del endpoint no necesitan un LLM.
+"""
+
 import asyncio
 import json
 from collections.abc import AsyncIterator
@@ -24,6 +38,10 @@ log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1", tags=["estimations"])
 
+# NOTA: definir el Query una vez y reutilizarlo en los tres endpoints evita
+# repetir el default y la descripción (que además aparece en Swagger /docs).
+# La versión va como query param (?prompt_version=v2) y no en el body porque
+# no es un dato del proyecto, sino una elección de "cómo" procesarlo.
 PromptVersion = Query(
     default=DEFAULT_VERSION,
     description="Prompt template version to render (see GET /api/v1/prompts/versions)",
@@ -32,6 +50,9 @@ PromptVersion = Query(
 
 def _render(request: EstimationRequest, version: str) -> tuple[str, str]:
     """Render the prompt, turning an unknown version into a client error."""
+    # NOTA: traducir excepciones de dominio a códigos HTTP es tarea del router.
+    # El loader no sabe nada de HTTP: solo lanza UnknownPromptVersionError.
+    # Aquí decidimos que eso es culpa del cliente → 422 Unprocessable Entity.
     try:
         return render_estimation_prompt(request, version=version)
     except UnknownPromptVersionError as exc:
@@ -40,6 +61,10 @@ def _render(request: EstimationRequest, version: str) -> tuple[str, str]:
 
 # Sync handler on purpose: FastAPI runs it in a worker thread, so the blocking
 # LLM call does not stall the event loop.
+# NOTA: si fuera ``async def`` y dentro hiciéramos una llamada bloqueante
+# (wrapper.complete tarda segundos), congelaríamos el servidor entero mientras
+# tanto: ninguna otra petición se atendería. Con ``def`` normal, FastAPI la
+# ejecuta en un hilo aparte automáticamente.
 @router.post("/estimate", response_model=EstimationResponse)
 def create_estimation(
     request: EstimationRequest,
@@ -47,11 +72,22 @@ def create_estimation(
     wrapper: LLMWrapper = Depends(get_llm_wrapper),
 ) -> EstimationResponse:
     """Estimate a project from the typed form parameters."""
+    # NOTA: ``request`` ya llega validado. Si el cliente mandó
+    # "project_type": "MOBILE_APP" o una descripción de 5 letras, FastAPI ya
+    # respondió 422 y esta función ni se ejecuta.
+    # ``wrapper`` llega por inyección de dependencias (Depends): en producción
+    # es el LLMWrapper real; en los tests se sustituye por un stub con
+    # ``app.dependency_overrides`` sin tocar este código.
     system, user = _render(request, prompt_version)
     try:
+        # NOTA: system y user viajan como DOS mensajes separados
+        # ({"role": "system"} y {"role": "user"}), no concatenados en uno.
         result = wrapper.complete(system_prompt=system, user_message=user)
     except Exception as exc:  # noqa: BLE001 — every provider failure maps to 502
         log.error("estimation_endpoint_error", error=str(exc), error_type=type(exc).__name__)
+        # NOTA: 502 Bad Gateway = "el servidor de más atrás falló". Distingue un
+        # fallo del proveedor LLM (no es culpa del cliente → no es 4xx) de un
+        # bug nuestro (500).
         raise HTTPException(status_code=502, detail=f"LLM provider error: {exc}") from exc
 
     return EstimationResponse(
@@ -77,6 +113,21 @@ async def create_estimation_stream(
 
     Emits ``token`` events, then one ``metrics`` event (JSON, including the
     ``prompt_version``) and a final ``done``.
+
+    NOTA: Server-Sent Events (SSE) es un protocolo sencillo sobre HTTP: el
+    servidor deja la conexión abierta y va enviando bloques de texto así::
+
+        event: token
+        data: Fase 1
+
+        event: metrics
+        data: {"model": "gpt-4o-mini", "usage": {...}, "prompt_version": "v1"}
+
+        event: done
+        data: [DONE]
+
+    El cliente pinta cada ``token`` según llega, en vez de esperar a la
+    respuesta completa.
     """
     system, user = _render(request, prompt_version)
 
@@ -89,6 +140,9 @@ async def create_estimation_stream(
             metrics=metrics,
         )
 
+        # NOTA: el iterador del wrapper es síncrono (bloquea mientras espera
+        # al proveedor). Para no bloquear el event loop, cada next() se ejecuta
+        # en un hilo con run_in_executor y lo esperamos con await.
         def _next_chunk() -> str | None:
             try:
                 return next(chunks)
@@ -126,6 +180,11 @@ async def preview_prompt(
 
     No LLM call: lets clients (the Streamlit sidebar) show what is sent to the
     model and how it changes with each form parameter or prompt version.
+
+    NOTA: endpoint didáctico y de depuración. Prueba en /docs a cambiar
+    ``output_format`` o ``prompt_version`` y compara el ``system`` devuelto:
+    verás exactamente qué bloque {% if %} del template se activa. Es gratis
+    (no gasta tokens) porque nunca llama al modelo.
     """
     system, user = _render(request, prompt_version)
     return PromptPreview(system=system, user=user, prompt_version=prompt_version)

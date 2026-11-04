@@ -1,3 +1,12 @@
+"""Endpoint tests: HTTP contract, prompt versions and validation.
+
+NOTA: aquí no se prueba el prompt (eso son los tests de tests/prompts/) sino el
+"cableado" del endpoint: que valida el body, que llama al loader, que pasa
+system y user por separado al wrapper y que traduce errores a códigos HTTP.
+El LLM real se sustituye por un stub, así que no hay red ni coste.
+"""
+
+
 from collections.abc import Iterator
 
 import pytest
@@ -16,6 +25,10 @@ VALID_BODY = {
 
 class _StubWrapper:
     """Records the messages it receives and returns a canned completion."""
+
+    # NOTA: un "stub" es un objeto falso con la misma interfaz que el real
+    # (aquí, el método complete). Devuelve siempre la misma respuesta y además
+    # guarda en self.calls qué le pasaron, para poder comprobarlo en el test.
 
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
@@ -39,6 +52,10 @@ class _StubWrapper:
 
 @pytest.fixture
 def stub() -> Iterator[_StubWrapper]:
+    # NOTA: dependency_overrides es la forma oficial de FastAPI de cambiar una
+    # dependencia (Depends(get_llm_wrapper)) por otra en tests. El endpoint no
+    # sabe que habla con un stub. El yield deja el override activo durante el
+    # test y lo retira después, para no contaminar otros tests.
     wrapper = _StubWrapper()
     app.dependency_overrides[get_llm_wrapper] = lambda: wrapper
     yield wrapper

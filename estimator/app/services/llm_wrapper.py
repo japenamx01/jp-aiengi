@@ -34,6 +34,10 @@ log = structlog.get_logger()
 
 
 # Router model groups. Each holds a single deployment; see the module docstring.
+# NOTA: un "grupo" es el nombre lógico al que se llama (model="estimator"). Si
+# dos modelos comparten grupo, LiteLLM los considera intercambiables y REPARTE
+# las llamadas entre ambos (balanceo). Con un grupo por modelo y la lista
+# ``fallbacks``, el segundo solo entra cuando el primero falla.
 PRIMARY_GROUP = "estimator"
 FALLBACK_GROUP = "estimator-fallback"
 
@@ -49,6 +53,9 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
 
 
 # Dated snapshots such as ``gpt-4o-mini-2024-07-18`` share the base model's price.
+# NOTA: pedimos "gpt-4o-mini" pero OpenAI responde con el nombre exacto del
+# snapshot (con fecha). Sin quitar la fecha, la búsqueda en MODEL_COSTS fallaba
+# y el coste salía 0.0. La regex elimina el sufijo -AAAA-MM-DD.
 _SNAPSHOT_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 
 
@@ -137,6 +144,12 @@ class LLMWrapper:
     ) -> dict[str, Any]:
         """Single LLM call with cache + (optional) fallback. Returns the legacy dict shape
         plus ``cache_hit`` and ``cost_usd`` fields.
+
+        NOTA: el orden importa y es el patrón "cache-aside":
+          1. Calcular la clave y mirar en Redis → si está, devolver (0 tokens).
+          2. Si no, llamar al modelo (vía Router, con fallback).
+          3. Normalizar la respuesta (mismo formato sea OpenAI o Anthropic).
+          4. Guardar en Redis para la próxima vez y devolver.
         """
         cache_key_model = model_override or self.primary_model
         cache_key = EstimationCache.make_key(
@@ -150,6 +163,8 @@ class LLMWrapper:
         if cached:
             return {**cached, "cache_hit": True}
 
+        # NOTA: aquí se ve la separación system/user que pide la sesión 4: dos
+        # mensajes con roles distintos, nunca un único texto concatenado.
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -252,6 +267,9 @@ class LLMWrapper:
         input_tokens = output_tokens = 0
         try:
             response = self._dispatch(model_override=model_override, **kwargs)
+            # NOTA: cada chunk trae un trocito de texto (delta). Con
+            # stream_options.include_usage, el ÚLTIMO chunk trae además el uso
+            # de tokens; por eso lo vamos recogiendo durante el bucle.
             for chunk in response:
                 # The served model may differ from the primary one after a fallback.
                 model = getattr(chunk, "model", None) or model
@@ -339,6 +357,9 @@ class LLMWrapper:
     def _dispatch(self, *, model_override: str | None, **kwargs: Any) -> Any:
         """Call the Router (with fallback) or LiteLLM directly when the caller
         wants a specific model."""
+        # NOTA: único punto donde salimos a la red. Al estar aislado, los tests
+        # del wrapper lo sustituyen con patch.object(wrapper.router, "completion")
+        # y prueban caché, costes y métricas sin llamar a ningún proveedor.
         if model_override:
             api_key = (
                 self.anthropic_api_key
