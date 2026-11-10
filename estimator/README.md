@@ -190,7 +190,9 @@ diccionario. Un `Lock` por sesion evita que dos peticiones simultaneas se pisen.
 Limites:
 - Solo `.pdf` y `.docx`; otro tipo devuelve **415**.
 - Un archivo corrupto, de mas de 5 MB o sin texto (un PDF escaneado necesitaria OCR)
-  devuelve **422**.
+  devuelve **422**. El selector de Streamlit usa las mismas constantes (tipos y
+  `max_upload_size=5`), asi que un archivo demasiado grande se rechaza en el navegador
+  antes de subirse.
 - El texto se recorta a 20 000 caracteres por archivo, porque se queda en el historial
   de los turnos siguientes.
 

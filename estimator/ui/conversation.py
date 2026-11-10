@@ -26,6 +26,7 @@ import streamlit as st
 
 from app.schemas.estimation import DetailLevel, OutputFormat, ProjectType
 from app.schemas.session import TRANSCRIPT_MAX_CHARS
+from app.services.attachments import MAX_ATTACHMENT_BYTES, SUPPORTED_EXTENSIONS
 from ui.common import (
     API_BASE_URL,
     LABELS,
@@ -100,10 +101,15 @@ with st.form("turn_form", clear_on_submit=True):
         max_chars=TRANSCRIPT_MAX_CHARS,
         placeholder="E.g. A project called VetCare: online bookings for 12 vet clinics.",
     )
+    # NOTA: el tipo y el tamaño máximo salen de las MISMAS constantes que usa
+    # el servicio (app/services/attachments.py). Así el navegador rechaza un
+    # archivo de 8 MB antes de subirlo, y si mañana cambia el límite del
+    # servicio, el selector cambia con él.
     uploads = st.file_uploader(
         "Attachments",
-        type=["pdf", "docx"],
+        type=[ext.lstrip(".") for ext in SUPPORTED_EXTENSIONS],
         accept_multiple_files=True,
+        max_upload_size=MAX_ATTACHMENT_BYTES // (1024 * 1024),
         help="Specifications, previous proposals or architecture notes (PDF or .docx).",
     )
     with st.expander("Estimation settings", icon=":material/tune:"):
