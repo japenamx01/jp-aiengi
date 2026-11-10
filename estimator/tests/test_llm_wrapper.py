@@ -8,7 +8,9 @@ from app.services.cache import EstimationCache
 from app.services.llm_wrapper import FALLBACK_GROUP, PRIMARY_GROUP, LLMWrapper, _estimate_cost
 
 
-def _fake_completion(model: str, content: str = "the answer", input_tokens: int = 100, output_tokens: int = 50):
+def _fake_completion(
+    model: str, content: str = "the answer", input_tokens: int = 100, output_tokens: int = 50
+):
     """Build a SimpleNamespace shaped like a litellm.ModelResponse."""
     return SimpleNamespace(
         model=model,
@@ -82,8 +84,10 @@ def test_complete_returns_normalised_dict_and_caches(wrapper: LLMWrapper) -> Non
 
 def test_complete_with_model_override_bypasses_router(wrapper: LLMWrapper) -> None:
     fake = _fake_completion(model="gpt-4o", content="overridden")
-    with patch("app.services.llm_wrapper.litellm.completion", return_value=fake) as direct, \
-        patch.object(wrapper.router, "completion") as router_call:
+    with (
+        patch("app.services.llm_wrapper.litellm.completion", return_value=fake) as direct,
+        patch.object(wrapper.router, "completion") as router_call,
+    ):
         result = wrapper.complete(
             system_prompt="sys",
             user_message="usr",
@@ -216,3 +220,45 @@ def test_router_always_picks_primary_and_falls_back_on_failure(wrapper: LLMWrapp
 
     fallback = wrapper.router.get_available_deployment(model=FALLBACK_GROUP)
     assert fallback["litellm_params"]["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_complete_messages_cache_key_covers_the_whole_history(wrapper):
+    """The same user message with a different history must not hit the cache."""
+    turn_1 = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "Add payments"},
+    ]
+    turn_2 = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "Booking app"},
+        {"role": "assistant", "content": "120 h"},
+        {"role": "user", "content": "Add payments"},
+    ]
+    with patch.object(
+        wrapper.router, "completion", return_value=_fake_completion("gpt-4o-mini", "ok")
+    ) as completion:
+        wrapper.complete_messages(turn_1)
+        second = wrapper.complete_messages(turn_2)
+        replay = wrapper.complete_messages(turn_2)
+
+    assert completion.call_count == 2
+    assert second["cache_hit"] is False
+    assert replay["cache_hit"] is True
+    assert completion.call_args.kwargs["messages"] == turn_2
+
+
+def test_complete_keeps_the_session_4_cache_key(wrapper):
+    """complete() delegates to complete_messages() without changing its cache key."""
+    with patch.object(
+        wrapper.router, "completion", return_value=_fake_completion("gpt-4o-mini", "ok")
+    ):
+        wrapper.complete(system_prompt="sys", user_message="hello")
+
+    key = EstimationCache.make_key(
+        system_prompt="sys",
+        user_message="hello",
+        model=wrapper.primary_model,
+        max_tokens=4000,
+        thinking_budget=None,
+    )
+    assert wrapper.cache.get(key) is not None

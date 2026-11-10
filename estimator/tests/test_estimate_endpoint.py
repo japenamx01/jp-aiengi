@@ -6,7 +6,6 @@ system y user por separado al wrapper y que traduce errores a códigos HTTP.
 El LLM real se sustituye por un stub, así que no hay red ni coste.
 """
 
-
 from collections.abc import Iterator
 
 import pytest

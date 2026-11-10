@@ -1,0 +1,17 @@
+{#
+  NOTA: el extractor recibe la memoria actual (para no contradecirla) y el
+  último turno completo: el mensaje del usuario (con adjuntos) y la respuesta.
+#}
+<known_facts>
+{{ known_facts }}
+</known_facts>
+
+<user_message>
+{{ user_message }}
+</user_message>
+
+<assistant_answer>
+{{ assistant_answer }}
+</assistant_answer>
+
+Return the JSON object with the project facts after this turn.

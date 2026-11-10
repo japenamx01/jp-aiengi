@@ -30,17 +30,28 @@ Flujo completo de una petición:
                               │
                               ▼
                         (system, user) ──► LLMWrapper ──► modelo
+
+Sesión 5 añade dos funciones más sobre el mismo ``_render``:
+
+    render_session_prompt()     → estimation/v3 con <project_metadata> y adjuntos
+    render_extraction_prompt()  → extraction/v1 (el "LLM extractor" de hechos)
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import structlog
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from app.schemas.estimation import EstimationRequest
+from app.schemas.session import SessionTurn
+from app.services.attachments import ExtractedAttachment
+from app.services.sessions import ProjectMetadata
 
 log = structlog.get_logger()
 
@@ -50,6 +61,10 @@ log = structlog.get_logger()
 PROMPTS_DIR = Path(__file__).resolve().parent
 ESTIMATION_DIR = PROMPTS_DIR / "estimation"
 DEFAULT_VERSION = "v1"
+# NOTA: la conversación usa siempre v3, la primera versión que sabe pintar
+# <project_metadata> y los adjuntos. v1 y v2 no cambian (son inmutables).
+SESSION_VERSION = "v3"
+EXTRACTION_VERSION = "v1"
 
 # NOTA: el Environment se crea UNA sola vez al importar el módulo. Jinja2
 # cachea internamente los templates ya compilados, así que renderizar en cada
@@ -129,13 +144,73 @@ def render_estimation_prompt(
     # El diccionario resultante es el "contexto" del template: cada clave pasa
     # a ser una variable disponible en el .j2 ({{ description }}, etc.).
     context = request.model_dump(mode="json")
+    # v3+ templates also read the session state; a stateless call has none.
+    # NOTA: sin sesión, v3 recibe la memoria y los adjuntos vacíos y se
+    # comporta como v2 con el bloque <project_metadata> sin contenido.
+    context.update(project_metadata=ProjectMetadata().model_dump(), attachments=[])
+    return _render(
+        "estimation",
+        version,
+        context,
+        project_type=context["project_type"],
+        detail_level=context["detail_level"],
+        output_format=context["output_format"],
+    )
 
+
+def render_session_prompt(
+    turn: SessionTurn,
+    project_metadata: ProjectMetadata,
+    attachments: Sequence[ExtractedAttachment] = (),
+    version: str = SESSION_VERSION,
+) -> tuple[str, str]:
+    """Render one conversation turn: system with the project facts, user with attachments.
+
+    The system prompt is regenerated on every turn from the *current* metadata,
+    so the facts are always up to date even when old turns left the window.
+    """
+    # NOTA: el transcript se pasa como ``description`` para reutilizar el mismo
+    # bloque <project_description> que las versiones anteriores.
+    context: dict[str, Any] = {
+        "description": turn.transcript,
+        "project_type": turn.project_type.value,
+        "detail_level": turn.detail_level.value,
+        "output_format": turn.output_format.value,
+        "project_metadata": project_metadata.model_dump(),
+        "attachments": [{"filename": a.filename, "text": a.text} for a in attachments],
+    }
+    return _render(
+        "estimation",
+        version,
+        context,
+        project_type=context["project_type"],
+        detail_level=context["detail_level"],
+        output_format=context["output_format"],
+        attachments=len(attachments),
+        has_metadata=not project_metadata.is_empty(),
+    )
+
+
+def render_extraction_prompt(
+    known_facts: ProjectMetadata, user_message: str, assistant_answer: str
+) -> tuple[str, str]:
+    """Render the prompt that asks the LLM for the project facts of one turn as JSON."""
+    context = {
+        "known_facts": json.dumps(known_facts.model_dump(), ensure_ascii=False, indent=2),
+        "user_message": user_message,
+        "assistant_answer": assistant_answer,
+    }
+    return _render("extraction", EXTRACTION_VERSION, context)
+
+
+def _render(task: str, version: str, context: dict[str, Any], **log_fields: Any) -> tuple[str, str]:
+    """Render ``<task>/<version>/{system,user}.j2`` and log the prompt fingerprint."""
     # NOTA: dos templates, dos mensajes. El system lleva las instrucciones
     # (quién eres, cómo responder); el user lleva SOLO los datos del usuario.
     # Mantenerlos separados ayuda al modelo a distinguir órdenes de datos y
     # reduce el riesgo de que un texto del usuario se "cuele" como instrucción.
-    system = _env.get_template(f"estimation/{version}/system.j2").render(**context).strip()
-    user = _env.get_template(f"estimation/{version}/user.j2").render(**context).strip()
+    system = _env.get_template(f"{task}/{version}/system.j2").render(**context).strip()
+    user = _env.get_template(f"{task}/{version}/user.j2").render(**context).strip()
 
     # NOTA (bonus de observabilidad): el hash es una "huella" corta del prompt
     # exacto. Si en producción dos respuestas tienen el mismo prompt_hash, el
@@ -144,13 +219,11 @@ def render_estimation_prompt(
     # entero (que puede ser largo o contener datos del cliente).
     log.info(
         "prompt_rendered",
-        prompt="estimation",
+        prompt=task,
         prompt_version=version,
         prompt_hash=hashlib.sha256(f"{system}\n\n{user}".encode()).hexdigest()[:12],
         system_chars=len(system),
         user_chars=len(user),
-        project_type=context["project_type"],
-        detail_level=context["detail_level"],
-        output_format=context["output_format"],
+        **log_fields,
     )
     return system, user

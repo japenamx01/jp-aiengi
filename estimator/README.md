@@ -37,7 +37,7 @@ En modulos posteriores del master, este servicio evolucionara a una arquitectura
    docker compose up --build
    ```
 
-4. La UI (formulario Streamlit) queda en `http://localhost:8501` y la API en `http://localhost:8000`
+4. La UI de Streamlit queda en `http://localhost:8501` (paginas *Conversation* y *Quick estimate*) y la API en `http://localhost:8000`
 
 ## Alternativa: ejecucion local sin Docker
 
@@ -54,6 +54,7 @@ cd estimator
 uv sync                                   # instala tambien pytest, ruff y fakeredis
 uv run pytest                             # suite completa (~0.4 s, sin llamadas a APIs)
 uv run pytest tests/prompts -v            # solo los tests de templates
+uv run pytest tests/test_session_endpoints.py -v   # los tests de integracion de la sesion 5
 uv run ruff check .                       # lint
 ```
 
@@ -81,35 +82,57 @@ Respuesta: `{"text": "...", "prompt_version": "v1", "model": ..., "usage": {...}
 estimator/
 ├── app/
 │   ├── main.py                  # Aplicacion FastAPI, health check, CORS
-│   ├── config.py                # Configuracion con Pydantic Settings
-│   ├── dependencies.py          # Singletons de cache Redis y LLMWrapper (Depends)
+│   ├── config.py                # Configuracion con Pydantic Settings (incluye MAX_TURNS)
+│   ├── dependencies.py          # Singletons: cache Redis, LLMWrapper y SessionStore (Depends)
 │   ├── routers/
-│   │   └── estimations.py       # POST /estimate, POST /estimate/stream (SSE),
-│   │                            #   POST /prompt/preview y GET /prompts/versions
+│   │   ├── estimations.py       # POST /estimate, POST /estimate/stream (SSE),
+│   │   │                        #   POST /prompt/preview y GET /prompts/versions
+│   │   └── sessions.py          # POST /sessions, GET /sessions/{id},
+│   │                            #   POST /sessions/{id}/estimate (multipart + adjuntos)
 │   ├── prompts/
-│   │   ├── loader.py            # render_estimation_prompt(request, version) -> (system, user)
-│   │   └── estimation/
-│   │       ├── v1/              # system.j2, user.j2, examples.j2
-│   │       └── v2/              # Igual que v1 con tono orientado a cliente
+│   │   ├── loader.py            # render_estimation_prompt / render_session_prompt /
+│   │   │                        #   render_extraction_prompt -> (system, user)
+│   │   ├── estimation/
+│   │   │   ├── v1/              # system.j2, user.j2, examples.j2
+│   │   │   ├── v2/              # Igual que v1 con tono orientado a cliente
+│   │   │   └── v3/              # v2 + <project_metadata> + adjuntos (conversacion)
+│   │   └── extraction/
+│   │       └── v1/              # Prompt del LLM extractor de project_metadata (JSON)
 │   ├── services/
-│   │   ├── llm_wrapper.py       # LiteLLM Router: fallback primario -> secundario,
-│   │   │                        #   cache, coste y uso de tokens en streaming
-│   │   └── cache.py             # Cache exact-match en Redis
+│   │   ├── llm_wrapper.py       # LiteLLM Router: fallback, cache, coste, streaming
+│   │   │                        #   y complete_messages() para el historial
+│   │   ├── cache.py             # Cache exact-match en Redis
+│   │   ├── sessions.py          # ConversationHistory (ventana), ProjectMetadata,
+│   │   │                        #   Session y SessionStore (dict en memoria)
+│   │   ├── attachments.py       # Extraccion local de texto: pypdf y python-docx
+│   │   └── metadata_extractor.py  # Segunda llamada al LLM -> ProjectMetadata
 │   └── schemas/
-│       └── estimation.py        # Contrato tipado: enums, EstimationRequest/Response
+│       ├── estimation.py        # Contrato tipado: enums, EstimationRequest/Response
+│       └── session.py           # SessionTurn, SessionEstimateResponse, SessionState
+├── ui/
+│   ├── common.py                # URL de la API, etiquetas y bloques del sidebar
+│   ├── conversation.py          # Pagina de conversacion (sesion 5)
+│   └── quick_estimate.py        # Formulario tipado de la sesion 4 (streaming opcional)
 ├── tests/
 │   ├── conftest.py              # Fixture compartida (TestClient de FastAPI)
+│   ├── helpers.py               # Genera PDF y .docx en memoria para los tests
 │   ├── prompts/
 │   │   ├── test_estimation_v1.py  # Tests del template v1 (sin LLM)
-│   │   └── test_estimation_v2.py  # Diferencias deliberadas de v2
+│   │   ├── test_estimation_v2.py  # Diferencias deliberadas de v2
+│   │   └── test_estimation_v3.py  # Bloque <project_metadata> y separadores de adjuntos
 │   ├── test_health.py           # Health check
 │   ├── test_estimate_endpoint.py  # POST /estimate, versiones, validacion, preview
 │   ├── test_estimate_stream.py  # Streaming SSE y evento metrics
+│   ├── test_session_endpoints.py  # Integracion de la sesion 5 (httpx.AsyncClient)
+│   ├── test_sessions.py         # Ventana deslizante y merge de la memoria
+│   ├── test_attachments.py      # Extraccion de PDF/Word, limites y errores
+│   ├── test_metadata_extractor.py  # Parseo del JSON y tolerancia a fallos
 │   ├── test_llm_wrapper.py      # Fallback del Router, cache, coste y metricas
 │   └── test_cache.py            # Cache Redis (fakeredis)
 ├── assets/
-│   └── session4-form.png        # Captura de la interfaz de la sesion 4
-├── streamlit_app.py             # Formulario tipado (streaming opcional) + sidebar
+│   ├── session4-form.png        # Captura de la interfaz de la sesion 4
+│   └── session5-conversation.png  # Conversacion de 3 turnos con la memoria visible
+├── streamlit_app.py             # Punto de entrada: st.navigation con las dos paginas
 ├── Dockerfile                   # Build multi-stage con uv (API y Streamlit)
 ├── docker-compose.yml           # API, Streamlit y Redis para desarrollo local
 ├── .env.example                 # Variables de entorno de referencia
@@ -122,6 +145,124 @@ Con el servicio corriendo, accede a la documentacion Swagger UI en:
 
 - **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
 - **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+## Sesion 5 — Memoria conversacional y contexto enriquecido
+
+![Conversacion de 3 turnos con la memoria del proyecto](assets/session5-conversation.png)
+
+El estimador deja de ser transaccional: el cliente refina **el mismo proyecto** turno a
+turno, adjunta documentos y el servicio recuerda de que proyecto se habla.
+
+### Historial vs memoria
+
+Son dos estructuras separadas en `app/services/sessions.py`, dentro de una `Session`
+indexada por `session_id`:
+
+- **Historial** (`ConversationHistory`): los mensajes user/assistant literales, lo que
+  viaja en el array `messages`. Usa una **ventana deslizante** de `MAX_TURNS=6` turnos
+  (un turno = par user+assistant, configurable en `.env`). El turno en curso cuenta:
+  cada llamada lleva como mucho los 5 turnos anteriores + el mensaje nuevo. El system
+  prompt no se guarda: `to_messages_list()` lo regenera en cada turno con la memoria
+  actual y siempre va primero.
+- **Memoria** (`ProjectMetadata`): los hechos del proyecto (`project_name`,
+  `assumed_team_size`, `mentioned_technologies`, `agreed_scope`). Se inyecta en el
+  system prompt (`v3`) dentro de `<project_metadata>`, que esta vacio en el primer
+  turno. Aunque la ventana descarte el turno donde se dijo el nombre, el nombre sigue.
+
+Las sesiones viven en un **diccionario en memoria del proceso** (`SessionStore`), sin BD
+ni Redis. Es volatil a proposito en esta fase: un reinicio (o un `--reload` al editar
+codigo) borra las conversaciones (el cliente recibe 404 y ofrece empezar otra), y el
+servicio debe correr con **un solo worker**, porque cada proceso tendria su propio
+diccionario. Un `Lock` por sesion evita que dos peticiones simultaneas se pisen.
+
+### Adjuntos: camino B (extraccion local)
+
+`app/services/attachments.py` extrae el texto con **pypdf** (PDF) y **python-docx**
+(Word, parrafos y tablas) y lo anade al mensaje de usuario con separadores
+`--- attachment: nombre.pdf ---`. Elegimos el camino B porque:
+
+- **Mantiene el fallback:** un archivo subido a la Files API de OpenAI no existe para
+  Anthropic, asi que el camino A romperia el fallback del Router.
+- **Mantiene la cache exact-match:** el texto del documento forma parte del prompt y,
+  por tanto, de la clave.
+- **Prepara el chunking de RAG del modulo 3.**
+
+Limites:
+- Solo `.pdf` y `.docx`; otro tipo devuelve **415**.
+- Un archivo corrupto, de mas de 5 MB o sin texto (un PDF escaneado necesitaria OCR)
+  devuelve **422**.
+- El texto se recorta a 20 000 caracteres por archivo, porque se queda en el historial
+  de los turnos siguientes.
+
+### Como se extrae el project_metadata: LLM extractor
+
+Tras cada respuesta, `app/services/metadata_extractor.py` hace una **segunda llamada**
+al LLM con su propio prompt (`prompts/extraction/v1/`): recibe la memoria actual y el
+ultimo turno completo (con adjuntos) y devuelve solo un JSON. Ese JSON se valida con
+Pydantic y se **fusiona** con la memoria anterior:
+- los campos que vienen `null` no borran lo que ya habia;
+- las tecnologias se acumulan sin duplicados.
+
+Lo elegimos frente a la heuristica con regex porque sobre una estimacion en texto
+libre una regex no saca de forma fiable el tamano del equipo ni el alcance acordado.
+El coste es una llamada corta mas por turno (`max_tokens=400`, mismo modelo barato y
+misma cache). Si el extractor falla (JSON roto o proveedor caido), la estimacion se
+devuelve igual y la memoria se queda como estaba.
+
+### Endpoints
+
+| Metodo | Ruta | Uso |
+|---|---|---|
+| `POST` | `/api/v1/sessions` | Crea una sesion vacia: `{"session_id": "<uuid4>", "max_turns": 6}` |
+| `POST` | `/api/v1/sessions/{session_id}/estimate` | `multipart/form-data`: `transcript`, `attachments[]` opcionales y los parametros tipados (`project_type`, `detail_level`, `output_format`, con valores por defecto). Devuelve el `EstimationResponse` de la sesion 4 + `project_metadata`, `turn`, `turns_in_window` y `attachments` |
+| `GET` | `/api/v1/sessions/{session_id}` | Memoria e historial guardado de la sesion (depuracion) |
+
+El historial y la memoria solo cambian si la llamada al LLM tiene exito: un 502 deja la
+sesion como estaba.
+
+```bash
+SID=$(curl -s -X POST localhost:8000/api/v1/sessions | jq -r .session_id)
+curl -s -X POST localhost:8000/api/v1/sessions/$SID/estimate \
+  -F "transcript=Proyecto llamado VetCare: citas online para 12 clinicas veterinarias." \
+  -F project_type=web_saas -F output_format=line_items | jq '{turn, project_metadata}'
+curl -s -X POST localhost:8000/api/v1/sessions/$SID/estimate \
+  -F "transcript=Te adjunto la especificacion; ajusta la estimacion." \
+  -F "attachments=@spec.pdf;type=application/pdf" | jq '{turn, project_metadata, attachments}'
+```
+
+### Cliente Streamlit
+
+`streamlit_app.py` usa `st.navigation` con dos paginas:
+
+- **Conversation** (`ui/conversation.py`, la de inicio):
+  - Crea la sesion al cargar la pagina y guarda el `session_id` en `st.session_state`.
+  - Muestra los turnos con `st.chat_message` y tiene un campo de texto con un selector
+    multiple de PDF/Word.
+  - En el sidebar estan:
+    - la **memoria** del proyecto (`project_metadata`);
+    - el indicador de la **ventana** (por ejemplo "3 / 6 turns kept");
+    - las metricas de la ultima llamada;
+    - el boton **New conversation**, que crea otra sesion y resetea la pagina.
+- **Quick estimate** (`ui/quick_estimate.py`): el formulario de la sesion 4, sin cambios.
+
+### Tests de la sesion 5
+
+- **`tests/test_session_endpoints.py`**: tests de integracion con `httpx.AsyncClient` y
+  `ASGITransport`. El LLM se sustituye por un stub que registra cada `messages`.
+  Cubren lo que pide el ejercicio:
+  - dos turnos actualizan el `project_metadata`: el nombre se conserva y las
+    tecnologias se acumulan;
+  - un PDF adjunto llega al prompt y cambia un campo concreto de la salida;
+  - con 8 turnos el historial enviado nunca pasa de `MAX_TURNS`.
+
+  Tambien cubren `.docx`, 404, 415, transcript vacio y un 502 que no toca la sesion.
+- **Tests unitarios:**
+  - `test_sessions.py`: ventana y merge de la memoria;
+  - `test_attachments.py`: extraccion, limites y errores;
+  - `test_metadata_extractor.py`: parseo y tolerancia a fallos;
+  - `prompts/test_estimation_v3.py`: bloque vacio o lleno y separadores.
+- Los PDF y `.docx` de prueba se generan en memoria (`tests/helpers.py`), sin binarios
+  en el repo.
 
 ## Sesion 4 — Del chat a la interfaz de producto
 
@@ -173,7 +314,7 @@ pieza y por que (loader Jinja2, templates, schemas, router, SSE, Streamlit, test
 cache y Router). Para recorrerlas:
 
 ```bash
-grep -rn "NOTA" app/ tests/ streamlit_app.py
+grep -rn "NOTA" app/ ui/ tests/ streamlit_app.py
 ```
 
 En los `.j2` las notas son comentarios Jinja (`{#  #}`), que **no** llegan al modelo:
