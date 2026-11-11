@@ -63,6 +63,7 @@ services:
     # edits show up after a browser "Rerun".
     volumes:
       - ./streamlit_app.py:/app/streamlit_app.py
+      - ./ui:/app/ui
       - ./app:/app/app
 
     command: >

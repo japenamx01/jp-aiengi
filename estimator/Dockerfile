@@ -41,6 +41,7 @@ COPY --from=builder /app/.venv /app/.venv
 # Copy application source code (API package and the Streamlit UI).
 COPY app/ /app/app/
 COPY streamlit_app.py /app/
+COPY ui/ /app/ui/
 
 # Ensure the non-root user owns everything it needs to run.
 RUN chown -R appuser:appgroup /app

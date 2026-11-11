@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     CACHE_TTL: int = 86400
 
     ESTIMATOR_API_BASE_URL: str = "http://localhost:8000"
+
+    # --- Session 5 fields (conversational memory) ---
+    # Sliding window: user+assistant turns kept per session (the current one included).
+    MAX_TURNS: int = Field(default=6, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_at_least_one_api_key(self) -> "Settings":

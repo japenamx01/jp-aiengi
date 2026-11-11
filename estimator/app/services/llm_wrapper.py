@@ -3,7 +3,8 @@ and structured logging to every LLM call in the estimator.
 
 Design notes
 ------------
-- The wrapper exposes two primitives: ``complete()`` (blocking, full response) and
+- The wrapper exposes three primitives: ``complete()`` (blocking, full response),
+  ``complete_messages()`` (the same over a whole conversation, Session 5) and
   ``complete_stream()`` (yields chunks). Prompt rendering lives in
   ``app.prompts.loader``; the routers glue both together.
 - The Router is configured with two model groups, "estimator" (primary) and
@@ -20,6 +21,7 @@ Design notes
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any, Iterator
@@ -145,16 +147,55 @@ class LLMWrapper:
         """Single LLM call with cache + (optional) fallback. Returns the legacy dict shape
         plus ``cache_hit`` and ``cost_usd`` fields.
 
-        NOTA: el orden importa y es el patrón "cache-aside":
+        NOTA: el orden importa y es el patrón "cache-aside" (lo ejecuta
+        ``complete_messages``, en la que delega este método):
           1. Calcular la clave y mirar en Redis → si está, devolver (0 tokens).
           2. Si no, llamar al modelo (vía Router, con fallback).
           3. Normalizar la respuesta (mismo formato sea OpenAI o Anthropic).
           4. Guardar en Redis para la próxima vez y devolver.
         """
+        # NOTA: aquí se ve la separación system/user que pide la sesión 4: dos
+        # mensajes con roles distintos, nunca un único texto concatenado.
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        return self.complete_messages(
+            messages,
+            model_override=model_override,
+            max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
+        )
+
+    def complete_messages(
+        self,
+        messages: list[dict],
+        *,
+        model_override: str | None = None,
+        max_tokens: int = 4000,
+        thinking_budget: int | None = None,
+    ) -> dict[str, Any]:
+        """Like ``complete()`` but over a full ``messages`` array (system first).
+
+        Used by the conversational endpoint, whose messages carry the sliding
+        window of previous turns. The cache key covers the whole array.
+        """
+        # NOTA: la clave de caché incluye TODA la conversación. El mismo texto
+        # "añade pagos" llega con un historial y una memoria distintos según el
+        # punto de la conversación → clave distinta → nunca se reutiliza una
+        # respuesta que no corresponde. Con solo [system, user] la clave es
+        # idéntica a la de la sesión 4, así que esa caché sigue sirviendo.
+        system_prompt = messages[0]["content"]
+        rest = messages[1:]
+        user_part = (
+            rest[0]["content"]
+            if len(rest) == 1 and rest[0]["role"] == "user"
+            else json.dumps(rest, ensure_ascii=False)
+        )
         cache_key_model = model_override or self.primary_model
         cache_key = EstimationCache.make_key(
             system_prompt=system_prompt,
-            user_message=user_message,
+            user_message=user_part,
             model=cache_key_model,
             max_tokens=max_tokens,
             thinking_budget=thinking_budget,
@@ -163,12 +204,6 @@ class LLMWrapper:
         if cached:
             return {**cached, "cache_hit": True}
 
-        # NOTA: aquí se ve la separación system/user que pide la sesión 4: dos
-        # mensajes con roles distintos, nunca un único texto concatenado.
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ]
         kwargs = self._build_call_kwargs(
             messages=messages,
             max_tokens=max_tokens,
@@ -181,6 +216,7 @@ class LLMWrapper:
             mode="blocking",
             model=model_override or self.primary_model,
             has_thinking=thinking_budget is not None,
+            messages=len(messages),
         )
         t0 = time.perf_counter()
         try:

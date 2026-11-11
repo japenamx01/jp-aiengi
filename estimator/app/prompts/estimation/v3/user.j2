@@ -1,0 +1,18 @@
+{#
+  NOTA: v3/user.j2 = el mensaje de usuario de UN turno: el texto escrito más
+  el texto extraído de cada adjunto (camino B, app/services/attachments.py).
+  Las marcas "--- attachment: nombre ---" separan cada documento para que el
+  modelo sepa de dónde viene cada dato. Este texto completo es el que se guarda
+  en el historial de la sesión.
+#}
+<project_description>
+{{ description }}
+</project_description>
+{% for attachment in attachments %}
+
+--- attachment: {{ attachment.filename }} ---
+{{ attachment.text }}
+--- end of attachment: {{ attachment.filename }} ---
+{% endfor %}
+
+Estimate the project described above, taking into account the attached documents and the previous messages of this conversation.
