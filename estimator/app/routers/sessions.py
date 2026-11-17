@@ -12,6 +12,7 @@ NOTA: flujo de un turno (POST /sessions/{id}/estimate)
         5. Llamar al LLM con todo el array              → wrapper.complete_messages (502)
         6. Guardar el turno en el historial (la ventana descarta el más viejo)
         7. Actualizar la memoria con el LLM extractor   → metadata_extractor.py
+        8. Emitir UN evento turn_observed con la telemetría del turno (sesión 6)
         │
         ▼
     SessionEstimateResponse (estimación + memoria + estado de la ventana)
@@ -21,6 +22,8 @@ un fallo del proveedor deja la sesión exactamente como estaba.
 """
 
 from __future__ import annotations
+
+import time
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -35,6 +38,7 @@ from app.schemas.session import (
     SessionEstimateResponse,
     SessionState,
     SessionTurn,
+    TurnObservation,
     TurnView,
 )
 from app.services.attachments import (
@@ -85,6 +89,7 @@ async def get_session(
         max_turns=session.history.max_turns,
         project_metadata=session.metadata,
         history=[TurnView(user=t.user, assistant=t.assistant) for t in session.history.turns],
+        last_observation=session.last_observation,
     )
 
 
@@ -116,6 +121,7 @@ def estimate_in_session(
         detail_level=detail_level,
         output_format=output_format,
     )
+    turn_started = time.perf_counter()
     extracted = _extract_all(attachments or [])
 
     # NOTA: todo lo que lee y escribe la sesión va dentro del lock (ver Session).
@@ -129,15 +135,35 @@ def estimate_in_session(
             history_turns=sum(1 for m in messages if m["role"] == "user") - 1,
             attachments=len(extracted),
         )
+        call_started = time.perf_counter()
         try:
             result = wrapper.complete_messages(messages)
         except Exception as exc:  # noqa: BLE001 — every provider failure maps to 502
             log.error("session_turn_failed", session_id=session_id, error=str(exc))
             raise HTTPException(status_code=502, detail=f"LLM provider error: {exc}") from exc
 
+        call_ms = int((time.perf_counter() - call_started) * 1000)
+
         session.history.add_turn(user, result["estimation"])
         session.turn_count += 1
-        session.metadata = extract_metadata(wrapper, session.metadata, user, result["estimation"])
+        extractor_stats: dict = {}
+        session.metadata = extract_metadata(
+            wrapper, session.metadata, user, result["estimation"], stats=extractor_stats
+        )
+
+        observation = _observe_turn(
+            session_id=session_id,
+            turn_index=session.turn_count,
+            user=user,
+            messages=messages,
+            extracted=extracted,
+            result=result,
+            call_ms=call_ms,
+            extractor_stats=extractor_stats,
+            turn_ms=int((time.perf_counter() - turn_started) * 1000),
+        )
+        session.last_observation = observation
+        log.info("turn_observed", **observation.model_dump())
 
         return SessionEstimateResponse(
             text=result["estimation"],
@@ -158,7 +184,54 @@ def estimate_in_session(
                 AttachmentInfo(filename=a.filename, chars=a.chars, truncated=a.truncated)
                 for a in extracted
             ],
+            observation=observation,
         )
+
+
+def _observe_turn(
+    *,
+    session_id: str,
+    turn_index: int,
+    user: str,
+    messages: list[dict],
+    extracted: list[ExtractedAttachment],
+    result: dict,
+    call_ms: int,
+    extractor_stats: dict,
+    turn_ms: int,
+) -> TurnObservation:
+    """Gather the telemetry of one turn into a single ``TurnObservation``."""
+    # NOTA: casi todo ya circulaba por el método en variables o logs sueltos;
+    # aquí solo se AGREGA. Un acierto de caché devuelve el coste y la latencia
+    # de la llamada ORIGINAL: en ese caso el turno no pagó nada y la latencia es
+    # la nuestra (ms). Los tokens se conservan como medida del tamaño del contexto.
+    cache_hit = bool(result.get("cache_hit", False))
+    usage = result.get("usage", {})
+    cost = 0.0 if cache_hit else float(result.get("cost_usd", 0.0))
+    extractor_hit = bool(extractor_stats.get("cache_hit", False))
+    extractor_cost = 0.0 if extractor_hit else float(extractor_stats.get("cost_usd", 0.0))
+    extractor_ms = 0 if extractor_hit else int(extractor_stats.get("latency_ms", 0))
+    return TurnObservation(
+        turn_index=turn_index,
+        session_id=session_id,
+        enriched_transcript_chars=len(user),
+        attachments_total_chars=sum(a.chars for a in extracted),
+        messages_in_window=len(messages),
+        tokens_in=usage.get("input_tokens", 0),
+        tokens_out=usage.get("output_tokens", 0),
+        cost_usd=cost,
+        latency_ms=call_ms if cache_hit else int(result.get("latency_ms", call_ms)),
+        cache_hit_kind="exact" if cache_hit else "none",
+        prompt_chars=sum(len(m["content"]) for m in messages),
+        history_turns=(len(messages) - 2) // 2,
+        model=result.get("model", ""),
+        extractor_tokens_in=extractor_stats.get("tokens_in", 0),
+        extractor_tokens_out=extractor_stats.get("tokens_out", 0),
+        extractor_cost_usd=extractor_cost,
+        extractor_latency_ms=extractor_ms,
+        turn_cost_usd=round(cost + extractor_cost, 6),
+        turn_latency_ms=turn_ms,
+    )
 
 
 def _extract_all(uploads: list[UploadFile]) -> list[ExtractedAttachment]:

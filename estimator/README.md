@@ -146,6 +146,44 @@ Con el servicio corriendo, accede a la documentacion Swagger UI en:
 - **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
 - **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
+## Sesion 6 — Stress test del CAG: medir donde rompe
+
+Hasta la sesion 5 el CAG mete todo en el contexto en cada turno: system prompt con
+la `ProjectMetadata` + ventana deslizante (`MAX_TURNS=6`) + transcript + texto
+extraido de los adjuntos. Este ejercicio **mide** (no optimiza) en que punto eso
+empieza a degradarse, como baseline para comparar con RAG en el modulo 3.
+
+### Que se anadio
+
+| Pieza | Archivo | Para que |
+|---|---|---|
+| `TurnObservation` + evento `turn_observed` | `app/schemas/session.py`, `app/routers/sessions.py` | Un unico evento por turno con los 13 campos del enunciado (+ coste/latencia del extractor). Tambien viaja en la respuesta (`observation`) y en `GET /sessions/{id}` (`last_observation`). |
+| Telemetria del extractor | `app/services/metadata_extractor.py` (`stats=`) | La segunda llamada LLM del turno tambien cuesta: `turn_cost_usd` = estimacion + extractor. |
+| Escenarios | `evals/stress/scenarios.py` | `growing`, `pivot` (React Native → Flutter en el turno 5) y `contradiction` (30.000 → 80.000 EUR en el turno 8), 20 turnos cada uno, con un hecho por turno (fact-tracker). |
+| PDFs calibrados | `evals/stress/fixtures/build_pdfs.py` | 5/20/50/100 KB de texto extraido, deterministas, con un marcador al principio y otro al final para medir el truncado (`MAX_ATTACHMENT_CHARS=20.000`). Los PDF no se comitean. |
+| Metricas | `evals/stress/metrics.py` | `LatencyBudgetMetric`, `CostBudgetMetric`, `MemoryDriftMetric` (match exacto case-insensitive, sin LLM-as-judge). |
+| Runner | `evals/stress/run.py` | escenarios × tamanos × repeticiones → `evals/stress/results.csv` (una fila por turno). |
+| Analisis | `evals/stress/analyze.py` | CSV → tablas Markdown del reporte (solo stdlib). |
+| Reporte | `evals/stress/REPORT.md` | El entregable: tabla resumen, tres curvas en tabla y la lectura. |
+
+### Como reproducirlo
+
+```bash
+cd estimator
+docker compose up -d                       # API en :8000 (un solo worker)
+uv run python -m evals.stress.fixtures.build_pdfs
+uv run python -m evals.stress.run --http http://localhost:8000 \
+    --scenarios growing,pivot,contradiction --attachment-sizes 0,5,20,50,100 \
+    --repeats 3 --concurrency 6 --output evals/stress/results.csv
+uv run python -m evals.stress.analyze evals/stress/results.csv
+uv run pytest tests/test_stress_metrics.py tests/test_stress_runner.py -v
+```
+
+Dos decisiones del runner que afectan a los numeros: el turno 1 lleva una
+referencia unica por sesion (*cache-bust*; si no, las repeticiones serian aciertos
+de la cache exacta) y el adjunto se envia solo en el turno 1 (`--attach-every-turn`
+para lo contrario).
+
 ## Sesion 5 — Memoria conversacional y contexto enriquecido
 
 ![Conversacion de 3 turnos con la memoria del proyecto](assets/session5-conversation.png)
