@@ -36,13 +36,27 @@ def extract_metadata(
     current: ProjectMetadata,
     user_message: str,
     assistant_answer: str,
+    stats: dict | None = None,
 ) -> ProjectMetadata:
-    """Return ``current`` refined with the facts of the last turn (never raises)."""
+    """Return ``current`` refined with the facts of the last turn (never raises).
+
+    When ``stats`` is given it receives the extractor call's usage, cost and
+    latency (Session 6 telemetry), even if the JSON turns out to be invalid.
+    """
     system, user = render_extraction_prompt(current, user_message, assistant_answer)
     try:
         result = wrapper.complete(
             system_prompt=system, user_message=user, max_tokens=EXTRACTION_MAX_TOKENS
         )
+        if stats is not None:
+            usage = result.get("usage", {})
+            stats.update(
+                tokens_in=usage.get("input_tokens", 0),
+                tokens_out=usage.get("output_tokens", 0),
+                cost_usd=result.get("cost_usd", 0.0),
+                latency_ms=result.get("latency_ms", 0),
+                cache_hit=result.get("cache_hit", False),
+            )
         update = parse_metadata(result["estimation"])
     except (ValueError, ValidationError) as exc:
         log.warning("metadata_extraction_invalid", error=str(exc))

@@ -30,6 +30,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -142,6 +143,9 @@ class Session:
     metadata: ProjectMetadata = field(default_factory=ProjectMetadata)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     turn_count: int = 0
+    # Session 6: telemetry of the last turn (a TurnObservation), exposed by
+    # GET /sessions/{id} so a client can read it without parsing logs.
+    last_observation: Any = None
     # NOTA: dos peticiones simultáneas a la MISMA sesión podrían leer el mismo
     # historial y pisarse al guardar. El lock serializa los turnos de una
     # sesión; sesiones distintas siguen atendiéndose en paralelo.

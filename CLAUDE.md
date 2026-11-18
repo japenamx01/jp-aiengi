@@ -53,6 +53,12 @@ Conversational flow (Session 5), `app/routers/sessions.py`:
 4. After a successful call the turn is stored (a `deque(maxlen=MAX_TURNS)`) and `app/services/metadata_extractor.py` runs a second LLM call (`prompts/extraction/v1`) that returns JSON, validated and merged into the metadata (nulls never erase known facts; technologies accumulate). Extractor failures are logged and keep the old metadata. A provider failure (502) leaves history and metadata untouched.
 5. `ui/conversation.py` creates the session on load, sends each turn with its files and shows the metadata, the window fill and the last-call metrics in the sidebar.
 
+Stress test (Session 6), `evals/stress/`:
+
+1. Every `POST /sessions/{id}/estimate` builds a `TurnObservation` (`app/schemas/session.py`) right before returning: the 13 fields of the exercise (`anchors_count`/`summary_chars` are always 0 and `last_resolved_tier` None — this CAG has no anchors, summarizer or tiers) plus extractor usage and `turn_cost_usd`. It is logged as one `turn_observed` event, returned as `observation` and exposed as `last_observation` by `GET /sessions/{id}`. On a cache hit the observation reports cost 0 and the measured latency.
+2. `evals/stress/run.py` walks `scenarios.py` (3 × 20 turns with fact-trackers) × PDF sizes (`fixtures/build_pdfs.py`, gitignored PDFs) × repeats against a running API and writes `results.csv`; `analyze.py` turns it into the tables of `REPORT.md`. The runner cache-busts turn 1 per session and sends the attachment on turn 1 only, by default.
+3. `evals/stress/metrics.py` defines its own `MetricResult` (there is no general evals framework in this repo yet). Facts tracked by the scenarios must not appear in the PDF filler text (a test checks it).
+
 Key design points future changes should respect:
 
 - **Prompts are versioned and immutable.** Never edit a published `vN/` in place: copy it to `vN+1/` and change it there, so every logged `prompt_version` maps to the exact text used. `system.j2` includes its own version's `examples.j2` by full path.
@@ -67,6 +73,7 @@ Key design points future changes should respect:
 ## Tests
 
 - `tests/prompts/` — template tests: they assert on the rendered text only (no LLM, no network, milliseconds). They do not evaluate the quality of the model's answer.
+- `tests/test_stress_metrics.py` / `tests/test_stress_runner.py` — Session 6 metrics and an in-process run of the stress runner with a stub wrapper (no tokens).
 - `tests/test_session_endpoints.py` — Session 5 integration tests with `httpx.AsyncClient` + `ASGITransport` (`pytest.mark.anyio`), overriding `get_llm_wrapper` and `get_session_store`. Test PDFs/.docx are built in memory by `tests/helpers.py`.
 - Endpoint and stream tests replace the wrapper with a stub via `app.dependency_overrides[get_llm_wrapper]`; wrapper and cache tests use `fakeredis`.
 
