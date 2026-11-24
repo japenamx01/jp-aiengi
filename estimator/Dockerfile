@@ -42,6 +42,10 @@ COPY --from=builder /app/.venv /app/.venv
 COPY app/ /app/app/
 COPY streamlit_app.py /app/
 COPY ui/ /app/ui/
+# Session 7: CLI scripts (compare.py, preview_chunks.py) and the budgets sample,
+# so `docker compose exec estimator python scripts/compare.py` works.
+COPY scripts/ /app/scripts/
+COPY data/ /app/data/
 
 # Ensure the non-root user owns everything it needs to run.
 RUN chown -R appuser:appgroup /app

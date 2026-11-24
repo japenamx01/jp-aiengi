@@ -83,7 +83,14 @@ estimator/
 ├── app/
 │   ├── main.py                  # Aplicacion FastAPI, health check, CORS
 │   ├── config.py                # Configuracion con Pydantic Settings (incluye MAX_TURNS)
-│   ├── dependencies.py          # Singletons: cache Redis, LLMWrapper y SessionStore (Depends)
+│   ├── dependencies.py          # Singletons: cache Redis, LLMWrapper, SessionStore,
+│   │                            #   chunker y embedder (Depends)
+│   ├── embedding_pipeline/      # Sesion 7: JSON -> chunks -> vectores (POST /embeddings/ingest)
+│   │   ├── schemas.py           # Budget/BudgetComponent -> Chunk/EmbeddedChunk/IngestResponse
+│   │   ├── chunker.py           # JSONStructuralChunker: 1 componente = 1 chunk + cabecera
+│   │   ├── embedder.py          # OpenAIEmbedder: lotes de 100, backoff, coste
+│   │   ├── router.py            # POST /embeddings/ingest
+│   │   └── SANITY_CHECK.md      # Las 3 parejas de compare.py + experimento de la cabecera
 │   ├── routers/
 │   │   ├── estimations.py       # POST /estimate, POST /estimate/stream (SSE),
 │   │   │                        #   POST /prompt/preview y GET /prompts/versions
@@ -120,6 +127,7 @@ estimator/
 │   │   ├── test_estimation_v1.py  # Tests del template v1 (sin LLM)
 │   │   ├── test_estimation_v2.py  # Diferencias deliberadas de v2
 │   │   └── test_estimation_v3.py  # Bloque <project_metadata> y separadores de adjuntos
+│   ├── embedding_pipeline/      # Sesion 7: chunker, embedder (cliente falso), endpoint, coseno
 │   ├── test_health.py           # Health check
 │   ├── test_estimate_endpoint.py  # POST /estimate, versiones, validacion, preview
 │   ├── test_estimate_stream.py  # Streaming SSE y evento metrics
@@ -132,6 +140,12 @@ estimator/
 ├── assets/
 │   ├── session4-form.png        # Captura de la interfaz de la sesion 4
 │   └── session5-conversation.png  # Conversacion de 3 turnos con la memoria visible
+├── scripts/
+│   ├── compare.py               # Coseno entre dos textos (sanity check de embeddings)
+│   ├── preview_chunks.py        # Ver chunks y tokens sin llamar a OpenAI
+│   └── header_effect.py         # Cuanto aporta la cabecera de contexto
+├── data/
+│   └── budgets_sample.json      # 15 presupuestos normalizados (52 componentes)
 ├── streamlit_app.py             # Punto de entrada: st.navigation con las dos paginas
 ├── Dockerfile                   # Build multi-stage con uv (API y Streamlit)
 ├── docker-compose.yml           # API, Streamlit y Redis para desarrollo local
@@ -145,6 +159,131 @@ Con el servicio corriendo, accede a la documentacion Swagger UI en:
 
 - **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
 - **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+## Sesion 7 — Pipeline minimo de embeddings y chunking
+
+Primer paso del CAG hacia la busqueda semantica (RAG): convertir los presupuestos
+historicos en JSON en vectores. **No se persiste nada**: los vectores se generan en
+memoria y se devuelven por HTTP. pgvector y la busqueda llegan en la Sesion 08.
+
+```
+budgets_sample.json ──► IngestRequest ──► JSONStructuralChunker ──► OpenAIEmbedder ──► IngestResponse
+  (15 presupuestos)     (valida Pydantic)   (1 componente = 1 chunk    (lotes de 100,     (52 vectores de 1536
+                                             + cabecera del padre)      reintentos)        dims + stats/coste)
+```
+
+### Piezas
+
+| Pieza | Archivo | Que hace |
+|---|---|---|
+| Contrato de datos | `app/embedding_pipeline/schemas.py` | `Budget`/`BudgetComponent` de entrada (`sector` y `complexity` como `Literal` cerrado: un valor raro da 422), `Chunk`/`EmbeddedChunk`/`IngestResponse` de salida. |
+| Chunker estructural | `app/embedding_pipeline/chunker.py` | Un componente = un chunk, sin overlap ni cortes por tamano. Antepone la cabecera del presupuesto padre y cuenta tokens con `tiktoken`. |
+| Embedder | `app/embedding_pipeline/embedder.py` | `text-embedding-3-small` (1536 dims) en lotes de 100, backoff 1s/2s/4s solo ante `RateLimitError`, un log `embedding_batch_done` por lote y el coste (0.02 USD por 1M tokens, constante del modulo). |
+| Endpoint | `app/embedding_pipeline/router.py` | `POST /embeddings/ingest`: orquesta chunk → embed → stats. |
+| Sanity check | `scripts/compare.py` + `app/embedding_pipeline/SANITY_CHECK.md` | Coseno entre dos textos, calculada a mano con `math` (sin numpy). Resultados de las 3 parejas del enunciado. |
+| Extras didacticos | `scripts/preview_chunks.py`, `scripts/header_effect.py` | Ver los chunks y sus tokens sin coste. Medir con numeros cuanto aporta la cabecera de contexto. |
+
+### Que se embebe y que no
+
+Este es el texto de un chunk tal cual se envia al modelo (`uv run python scripts/preview_chunks.py`):
+
+```
+[Project: Mobile banking API with OAuth 2.0 authentication and PSD2 compliance]
+[Client sector: finance | Year: 2024 | Main tech: ruby_on_rails]
+
+Component: OAuth 2.0 authentication backend
+Description: Implementation of OAuth 2.0 flows (authorization code, refresh token) with ...
+Tech stack: ruby_on_rails, postgresql, redis
+Complexity: high
+Estimated hours: 120
+```
+
+La `metadata` viaja con el chunk pero **no** se embebe: `budget_id`, `component_id`,
+`client_sector`, `main_technology`, `year`, `complexity` y `estimated_hours`. Son campos
+exactos para filtrar en la Sesion 08 (`WHERE client_sector = 'finance'`). El vector capta
+el significado y la metadata sirve para filtrar por igualdad. El `chunk_id`
+(`BUD-2024-001::AUTH-001`) permite rastrear de donde salio cada vector.
+
+### Decisiones y su porque
+
+| Decision | Por que |
+|---|---|
+| Chunking estructural (1 componente = 1 chunk) | El JSON ya trae unidades de significado completas; el mayor chunk del sample tiene 106 tokens, muy lejos del limite de 8191. |
+| Cabecera de contexto | Sin ella, componentes parecidos de sectores distintos se confunden. Ver el experimento en `SANITY_CHECK.md`: en un caso, sin cabecera gana el componente equivocado. |
+| Lotes de 100 | El endpoint acepta listas: los 52 chunks salen en 1 llamada HTTP, no en 52. |
+| Reintentos solo ante 429 | Un rate limit se resuelve esperando; una clave invalida no. Los reintentos internos del SDK estan apagados (`max_retries=0`) para que haya un solo sitio que reintenta. |
+| SDK de OpenAI directo, no `LLMWrapper` | Anthropic no tiene embeddings, asi que el fallback no aplica, y la cache de completions tampoco. |
+| 1536 dims, sin recortar | Matryoshka (`dimensions=`) se discute en el directo. |
+| Coseno a mano, sin numpy | Son 3 lineas con `math`; no compensa una dependencia pesada. |
+
+### Endpoint
+
+```
+POST /embeddings/ingest
+  Input  (IngestRequest):  {"budgets": [ <Budget>, ... ]}
+  Output (IngestResponse): {"chunks": [ <EmbeddedChunk>, ... ],
+                            "stats": {"total_budgets", "total_chunks", "total_tokens", "estimated_cost_usd"}}
+  200 OK · 422 validacion Pydantic · 500 fallo de la API de embeddings o sin OPENAI_API_KEY
+            (mensaje generico al cliente, detalle en el log embeddings_ingest_failed)
+```
+
+Necesita `OPENAI_API_KEY` en `.env` aunque el LLM de estimacion use Anthropic. Aparece en
+Swagger (`http://localhost:8000/docs`) y se puede probar desde ahi. Desde la terminal
+(`data/budgets_sample.json` es un array; el endpoint espera `{"budgets": [...]}`):
+
+```bash
+cd estimator
+docker compose build estimator && docker compose up -d   # reconstruir: tiktoken es nueva
+
+# curl
+curl -s -X POST http://localhost:8000/embeddings/ingest \
+  -H 'Content-Type: application/json' \
+  -d "{\"budgets\": $(cat data/budgets_sample.json)}" | python -m json.tool | tail -8
+
+# httpie (envuelve el array en el campo "budgets")
+http POST :8000/embeddings/ingest budgets:=@data/budgets_sample.json
+```
+
+Con el sample: 15 presupuestos → 52 chunks → 4126 tokens → 0.0000825 USD, en una sola
+llamada (~2 s).
+
+### `compare.py`: dentro y fuera del contenedor
+
+```bash
+# Dentro del contenedor (scripts/ y data/ van en la imagen y estan bind-montados):
+docker compose exec estimator python scripts/compare.py \
+  --text-a "OAuth 2.0 authentication backend for fintech" \
+  --text-b "JWT-based authorization service for banking app"
+
+# Fuera del contenedor (desde estimator/, con el .env presente):
+uv run python scripts/compare.py \
+  --text-a "OAuth 2.0 authentication backend for fintech" \
+  --text-b "JWT-based authorization service for banking app"
+```
+
+Salida: `Text A`, `Text B`, `Model` y `Cosine similarity: 0.xxxx`. Resultados de las 3
+parejas: A (cercanos) 0.5957, B (no relacionados) 0.1920, C (genericos) 0.5407. El analisis
+esta en [`app/embedding_pipeline/SANITY_CHECK.md`](app/embedding_pipeline/SANITY_CHECK.md).
+
+Los extras se lanzan igual: `scripts/preview_chunks.py [--show N]` (coste 0) y
+`scripts/header_effect.py` (~800 tokens).
+
+### Tests
+
+```bash
+uv run pytest tests/embedding_pipeline -v
+```
+
+Cubren el chunker (52 chunks, `chunk_id`, cabecera, metadata, tokens), el embedder con un
+cliente falso (lotes 100+100+50, orden de los vectores, backoff 1/2/4 y no reintentar un
+401), el endpoint (200, 422, 500 sin detalle interno) y la coseno. No gastan tokens.
+
+### Fuera de scope (se ve en el directo)
+
+Otras estrategias de chunking (recursive, semantic, hierarchical, late, contextual
+retrieval), comparar modelos de embeddings, enriquecer chunks con un LLM, persistencia
+vectorial, busqueda semantica y metricas de retrieval (recall@k, NDCG). La interfaz de
+Streamlit no cambia.
 
 ## Sesion 6 — Stress test del CAG: medir donde rompe
 

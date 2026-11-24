@@ -59,6 +59,14 @@ Stress test (Session 6), `evals/stress/`:
 2. `evals/stress/run.py` walks `scenarios.py` (3 × 20 turns with fact-trackers) × PDF sizes (`fixtures/build_pdfs.py`, gitignored PDFs) × repeats against a running API and writes `results.csv`; `analyze.py` turns it into the tables of `REPORT.md`. The runner cache-busts turn 1 per session and sends the attachment on turn 1 only, by default.
 3. `evals/stress/metrics.py` defines its own `MetricResult` (there is no general evals framework in this repo yet). Facts tracked by the scenarios must not appear in the PDF filler text (a test checks it).
 
+Embedding pipeline (Session 7), `app/embedding_pipeline/` — first step towards RAG, nothing is persisted yet (pgvector arrives in Session 8):
+
+1. `POST /embeddings/ingest` (prefix `/embeddings`, no `/api/v1`, as the exercise specifies) takes `IngestRequest{budgets: list[Budget]}`; `sector`/`complexity` are closed `Literal`s, so unknown values are a 422.
+2. `JSONStructuralChunker` (`chunker.py`): one `BudgetComponent` = one `Chunk`, no overlap or size splitting. `text` = parent header (`[Project: …]` / `[Client sector: … | Year: … | Main tech: …]`) + component detail; `metadata` holds filterable fields that are NOT embedded; `chunk_id = "{budget_id}::{component_id}"`; `token_count` via tiktoken (encoding loaded once at import).
+3. `OpenAIEmbedder` (`embedder.py`) calls `text-embedding-3-small` (1536 dims) directly through the OpenAI SDK (not `LLMWrapper`: Anthropic has no embeddings). Batches of 100, backoff 1s/2s/4s on `RateLimitError` only, one `embedding_batch_done` log per batch, `PRICE_PER_MILLION_TOKENS_USD` module constant. The client and `sleep` are injected so tests use fakes.
+4. `app/dependencies.py::build_embedder()` builds it from settings (`EMBEDDING_MODEL`, `max_retries=0` so the SDK does not retry on top of our backoff) and returns `None` without `OPENAI_API_KEY`; `get_embedder()` caches it and the router maps `None` or any API error to a generic 500 (detail only in the `embeddings_ingest_failed` log).
+5. `scripts/compare.py` (hand-written cosine, stdlib only) produced `SANITY_CHECK.md`; `scripts/preview_chunks.py` shows chunks/tokens with no API calls; `scripts/header_effect.py` measures how much the contextual header helps. Scripts add the project root to `sys.path` so they run both with `uv run python scripts/…` and `docker compose exec estimator python scripts/…`.
+
 Key design points future changes should respect:
 
 - **Prompts are versioned and immutable.** Never edit a published `vN/` in place: copy it to `vN+1/` and change it there, so every logged `prompt_version` maps to the exact text used. `system.j2` includes its own version's `examples.j2` by full path.
@@ -74,6 +82,7 @@ Key design points future changes should respect:
 
 - `tests/prompts/` — template tests: they assert on the rendered text only (no LLM, no network, milliseconds). They do not evaluate the quality of the model's answer.
 - `tests/test_stress_metrics.py` / `tests/test_stress_runner.py` — Session 6 metrics and an in-process run of the stress runner with a stub wrapper (no tokens).
+- `tests/embedding_pipeline/` — Session 7: chunker on the real sample, embedder with `FakeOpenAI` (`fakes.py`: batching, order, retries), endpoint via `dependency_overrides[get_embedder]`, and the cosine of `scripts/compare.py`. No tokens.
 - `tests/test_session_endpoints.py` — Session 5 integration tests with `httpx.AsyncClient` + `ASGITransport` (`pytest.mark.anyio`), overriding `get_llm_wrapper` and `get_session_store`. Test PDFs/.docx are built in memory by `tests/helpers.py`.
 - Endpoint and stream tests replace the wrapper with a stub via `app.dependency_overrides[get_llm_wrapper]`; wrapper and cache tests use `fakeredis`.
 
@@ -85,9 +94,10 @@ Key design points future changes should respect:
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — at least one is required; the fallback needs both.
 - `REDIS_URL`, `CACHE_TTL` — exact-match cache (compose overrides `REDIS_URL` to `redis://redis:6379`).
 - `ESTIMATOR_API_BASE_URL` — where Streamlit reaches the API (compose sets `http://estimator:8000`).
+- `EMBEDDING_MODEL` — embeddings model for `/embeddings/ingest` and the scripts (default `text-embedding-3-small`); embeddings always need `OPENAI_API_KEY`.
 - `MAX_TURNS` — sliding-window size in user+assistant turns (default 6, current turn included).
 - `APP_ENV` — `development` | `staging` | `production` (controls log renderer).
 
 ## Docker
 
-Multi-stage Dockerfile: `builder` installs prod-only deps with `uv sync --no-install-project --no-dev`, `runtime` is a clean `python:3.11-slim` that only carries `/app/.venv`, `app/`, `ui/` and `streamlit_app.py`, runs as non-root `appuser`. There is a Docker-native HEALTHCHECK against `/health`. `docker-compose.yml` runs three services from that image plus Redis: `estimator` (API, :8000), `streamlit` (UI, :8501) and `redis`. It bind-mounts `./app` (and `streamlit_app.py`, `ui/`) and adds `--reload` for dev — strip both for any production deployment.
+Multi-stage Dockerfile: `builder` installs prod-only deps with `uv sync --no-install-project --no-dev`, `runtime` is a clean `python:3.11-slim` that only carries `/app/.venv`, `app/`, `ui/`, `streamlit_app.py`, `scripts/` and `data/`, runs as non-root `appuser`. There is a Docker-native HEALTHCHECK against `/health`. `docker-compose.yml` runs three services from that image plus Redis: `estimator` (API, :8000), `streamlit` (UI, :8501) and `redis`. It bind-mounts `./app` (plus `scripts/` and `data/` for the API, and `streamlit_app.py`, `ui/` for Streamlit) and adds `--reload` for dev — strip both for any production deployment.
