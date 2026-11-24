@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     # Sliding window: user+assistant turns kept per session (the current one included).
     MAX_TURNS: int = Field(default=6, ge=1, le=50)
 
+    # --- Session 7 fields (embedding pipeline) ---
+    # NOTA: los embeddings SIEMPRE van a OpenAI (Anthropic no ofrece modelo de
+    # embeddings), así que POST /embeddings/ingest necesita OPENAI_API_KEY aunque
+    # el LLM de estimación use Anthropic.
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+
     @model_validator(mode="after")
     def validate_at_least_one_api_key(self) -> "Settings":
         """LiteLLM may try either provider via fallback, so we require at least one key."""
