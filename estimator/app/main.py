@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.embedding_pipeline import router as embeddings
 from app.routers import estimations, sessions
 
 
@@ -63,6 +64,8 @@ app.add_middleware(
 
 app.include_router(estimations.router)
 app.include_router(sessions.router)
+# Session 7: POST /embeddings/ingest (no /api/v1 prefix, as the exercise specifies).
+app.include_router(embeddings.router)
 
 
 @app.get("/health")
