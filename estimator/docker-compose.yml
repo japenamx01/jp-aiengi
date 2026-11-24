@@ -25,6 +25,9 @@ services:
     # inside the container without rebuilding the image.
     volumes:
       - ./app:/app/app
+      # Session 7: edit the scripts / sample without rebuilding the image.
+      - ./scripts:/app/scripts
+      - ./data:/app/data
 
     # Override the default CMD to enable auto-reload on file changes.
     # Remove --reload for production deployments.

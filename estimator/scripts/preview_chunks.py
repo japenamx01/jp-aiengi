@@ -16,13 +16,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from _bootstrap import DEFAULT_SAMPLE  # noqa: F401  (also fixes sys.path)
+# NOTA: al ejecutar ``python scripts/x.py`` Python añade scripts/ a sys.path, no
+# la raíz del proyecto, y ``import app`` fallaría. Añadimos la raíz (estimator/
+# en local, /app en el contenedor) para que funcione igual dentro y fuera de Docker.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from app.embedding_pipeline.chunker import JSONStructuralChunker
-from app.embedding_pipeline.embedder import estimated_cost_usd
-from app.embedding_pipeline.schemas import Budget
+from app.embedding_pipeline.chunker import JSONStructuralChunker  # noqa: E402
+from app.embedding_pipeline.embedder import estimated_cost_usd  # noqa: E402
+from app.embedding_pipeline.schemas import Budget  # noqa: E402
+
+DEFAULT_SAMPLE = ROOT / "data" / "budgets_sample.json"
 
 
 def main() -> int:
